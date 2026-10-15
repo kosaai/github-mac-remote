@@ -1,4 +1,4 @@
-name: macOS VNC Session (Tailscale)
+name: macOS VNC Session (Verified Screen)
 
 on:
   workflow_dispatch:
@@ -43,7 +43,7 @@ permissions:
 jobs:
 
   # ============================================================
-  # ????? Runner
+  # ?????? Runner
   # ============================================================
 
   resolve-runner:
@@ -78,24 +78,24 @@ jobs:
 
             intel)
               if [ "$OS" != "26" ]; then
-                echo "ERROR: intel option is only supported here with macOS 26"
+                echo "ERROR: intel option requires macOS 26."
                 exit 1
               fi
               LABEL="macos-26-intel"
               ;;
 
             *)
-              echo "ERROR: Unknown runner size"
+              echo "ERROR: Unknown runner size."
               exit 1
               ;;
           esac
 
-          echo "Selected runner: ${LABEL}"
-          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+          echo "Selected runner: $LABEL"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
 
 
   # ============================================================
-  # macOS + VNC + Tailscale
+  # macOS VNC
   # ============================================================
 
   mac-vnc-session:
@@ -113,7 +113,7 @@ jobs:
     steps:
 
       # ========================================================
-      # ??? Secrets
+      # Secrets
       # ========================================================
 
       - name: Validate secrets
@@ -125,55 +125,54 @@ jobs:
           set -e
 
           if [ -z "$VNC_PASSWORD" ]; then
-            echo "ERROR: VNC_PASSWORD secret is missing"
+            echo "ERROR: VNC_PASSWORD secret is missing."
             exit 1
           fi
 
           if [ -z "$TAILSCALE_AUTH_KEY" ]; then
-            echo "ERROR: TAILSCALE_AUTH_KEY secret is missing"
+            echo "ERROR: TAILSCALE_AUTH_KEY secret is missing."
             exit 1
           fi
 
-          LENGTH="${#VNC_PASSWORD}"
-
-          if [ "$LENGTH" -ne 8 ]; then
+          if [ "${#VNC_PASSWORD}" -ne 8 ]; then
             echo "ERROR: VNC_PASSWORD must be exactly 8 characters."
-            echo "Current length: $LENGTH"
             exit 1
           fi
 
-          echo "Secrets are configured."
+          echo "Secrets OK."
 
 
       # ========================================================
-      # ??????? ?????
+      # ??????? ??????
       # ========================================================
 
       - name: System information
         shell: bash
         run: |
           echo "=========================================="
-          echo "macOS VNC Session"
+          echo "macOS VNC Verified Session"
           echo "=========================================="
+
           sw_vers
-          echo ""
-          uname -a
+
           echo ""
           echo "Architecture:"
           uname -m
+
           echo ""
           echo "Runner:"
           echo "${{ needs.resolve-runner.outputs.runner_label }}"
+
           echo ""
-          echo "Requested duration:"
+          echo "Duration:"
           echo "${SESSION_DURATION} hour(s)"
 
 
       # ========================================================
-      # ????? Screen Sharing / VNC
+      # Screen Sharing
       # ========================================================
 
-      - name: Enable macOS Screen Sharing and VNC
+      - name: Enable Screen Sharing and VNC
         shell: bash
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
@@ -185,9 +184,18 @@ jobs:
           KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
           SCREEN_PLIST="/System/Library/LaunchDaemons/com.apple.screensharing.plist"
 
-          echo "Enabling Screen Sharing..."
+          echo "Starting macOS Screen Sharing..."
 
-          # ????? ???? Screen Sharing
+          if [ ! -f "$KICKSTART" ]; then
+            echo "ERROR: ARD kickstart is not available."
+            exit 1
+          fi
+
+
+          # ----------------------------------------------------
+          # Screen Sharing service
+          # ----------------------------------------------------
+
           sudo launchctl enable \
             system/com.apple.screensharing \
             2>/dev/null || true
@@ -197,12 +205,16 @@ jobs:
             "$SCREEN_PLIST" \
             2>/dev/null || true
 
-          sudo launchctl load -w \
+          sudo launchctl load \
+            -w \
             "$SCREEN_PLIST" \
             2>/dev/null || true
 
 
-          # ????? Apple Remote Desktop + VNC Legacy
+          # ----------------------------------------------------
+          # Remote Management + Legacy VNC
+          # ----------------------------------------------------
+
           sudo "$KICKSTART" \
             -activate \
             -configure \
@@ -220,40 +232,10 @@ jobs:
             -menu
 
 
-          # ====================================================
-          # ?????? ????? Screen Sharing ????????? ??? macOS 14
-          # ====================================================
+          # ----------------------------------------------------
+          # ????? ???????
+          # ----------------------------------------------------
 
-          MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
-
-          if [ "$MACOS_MAJOR" = "14" ]; then
-
-            echo "Applying macOS 14 Screen Sharing permissions..."
-
-            TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-
-            if [ -f "$TCC_DB" ]; then
-
-              NOW="$(date +%s)"
-
-              sudo sqlite3 "$TCC_DB" "
-              DELETE FROM access
-              WHERE client='com.apple.screensharing.agent'
-              AND service='kTCCServiceScreenCapture';
-              " 2>/dev/null || true
-
-              sudo sqlite3 "$TCC_DB" "
-              DELETE FROM access
-              WHERE client='com.apple.screensharing.agent'
-              AND service='kTCCServicePostEvent';
-              " 2>/dev/null || true
-
-            fi
-
-          fi
-
-
-          # ????? ????? ???????
           sudo launchctl kickstart \
             -k \
             system/com.apple.screensharing \
@@ -265,48 +247,242 @@ jobs:
             2>/dev/null || true
 
 
-          echo "Waiting for VNC..."
+          # ----------------------------------------------------
+          # ????? ?????? ??????? ??????
+          # ----------------------------------------------------
 
+          caffeinate -u -t 20 &
           sleep 8
 
 
-          # ??? TCP 5900
-          SUCCESS=0
+          # ----------------------------------------------------
+          # Port test
+          # ----------------------------------------------------
+
+          PORT_OK=0
 
           for i in {1..20}; do
 
             if nc -z 127.0.0.1 5900 2>/dev/null; then
-              SUCCESS=1
-              echo "SUCCESS: VNC is listening on TCP port 5900"
+              PORT_OK=1
               break
             fi
 
-            echo "Waiting for VNC... ${i}/20"
+            echo "Waiting for TCP 5900... ${i}/20"
             sleep 2
 
           done
 
 
-          if [ "$SUCCESS" -ne 1 ]; then
+          if [ "$PORT_OK" -ne 1 ]; then
+            echo "================================================"
+            echo "FAIL: VNC SERVER DID NOT START"
+            echo "TCP port 5900 is not listening."
+            echo "================================================"
+            exit 1
+          fi
+
+          echo "VNC TCP/5900 is listening."
+
+
+      # ========================================================
+      # ????? VNC client ????????
+      # ========================================================
+
+      - name: Install VNC framebuffer tester
+        shell: bash
+        run: |
+          set -e
+
+          python3 -m venv /tmp/vnc-test-env
+
+          source /tmp/vnc-test-env/bin/activate
+
+          python -m pip install \
+            --upgrade \
+            pip
+
+          python -m pip install \
+            vncdotool \
+            pillow
+
+          echo "VNC framebuffer tester installed."
+
+
+      # ========================================================
+      # ???????? ??????
+      #
+      # ??? ???? ?????? ?? VNC ????? ?????? ???? ??????? ??????.
+      # ========================================================
+
+      - name: TEST actual VNC framebuffer
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          set -e
+
+          echo "::add-mask::$VNC_PASSWORD"
+
+          source /tmp/vnc-test-env/bin/activate
+
+          rm -f /tmp/vnc-frame.png
+
+          echo ""
+          echo "================================================"
+          echo "TESTING THE ACTUAL VNC VIDEO OUTPUT"
+          echo "================================================"
+          echo ""
+
+          # ????? display ?? ??? ?????
+          caffeinate -u -t 15 &
+          sleep 3
+
+
+          # ----------------------------------------------------
+          # VNC client ????? ??? framebuffer ???? ????? ???????
+          # ----------------------------------------------------
+
+          set +e
+
+          vncdo \
+            --timeout 20 \
+            -s 127.0.0.1::5900 \
+            -p "$VNC_PASSWORD" \
+            capture /tmp/vnc-frame.png
+
+          VNC_RESULT=$?
+
+          set -e
+
+
+          if [ "$VNC_RESULT" -ne 0 ]; then
 
             echo ""
-            echo "ERROR: VNC did not start."
+            echo "================================================"
+            echo "FAIL: VNC COULD NOT RETURN A SCREEN IMAGE"
+            echo "================================================"
             echo ""
-
-            sudo launchctl print \
-              system/com.apple.screensharing \
-              2>/dev/null || true
-
+            echo "VNC connection exists, but an actual framebuffer"
+            echo "could not be captured."
             echo ""
-
-            sudo lsof \
-              -nP \
-              -iTCP \
-              -sTCP:LISTEN \
-              2>/dev/null || true
+            echo "RVNC Viewer would therefore not be trusted to work."
+            echo ""
+            echo "Stopping workflow BEFORE Tailscale."
+            echo ""
 
             exit 1
           fi
+
+
+          if [ ! -s /tmp/vnc-frame.png ]; then
+
+            echo ""
+            echo "FAIL: VNC returned no image file."
+            exit 1
+
+          fi
+
+
+          # ----------------------------------------------------
+          # ????? ??????
+          #
+          # ????? ??:
+          # - ????? ??????
+          # - ????? ???????
+          # - ???? ???????? ???????
+          # - ???? ???????? ????? ???? ??????
+          # ----------------------------------------------------
+
+          python <<'PY'
+          from PIL import Image, ImageStat
+          import sys
+
+          path = "/tmp/vnc-frame.png"
+
+          try:
+              img = Image.open(path).convert("RGB")
+          except Exception as exc:
+              print("FAIL: Cannot open captured VNC framebuffer:", exc)
+              sys.exit(1)
+
+          width, height = img.size
+
+          gray = img.convert("L")
+          stat = ImageStat.Stat(gray)
+
+          mean = float(stat.mean[0])
+          stddev = float(stat.stddev[0])
+
+          histogram = gray.histogram()
+          total = width * height
+
+          # pixels ??????? ?????
+          near_black_pixels = sum(histogram[0:8])
+          black_ratio = near_black_pixels / total if total else 1.0
+
+          extrema = gray.getextrema()
+
+          print("")
+          print("==============================================")
+          print("VNC FRAMEBUFFER ANALYSIS")
+          print("==============================================")
+          print(f"Resolution      : {width} x {height}")
+          print(f"Mean brightness : {mean:.2f}")
+          print(f"Std deviation   : {stddev:.2f}")
+          print(f"Near-black      : {black_ratio * 100:.2f}%")
+          print(f"Brightness range: {extrema}")
+          print("==============================================")
+          print("")
+
+          # ???? ??? ??????
+          if width < 320 or height < 200:
+              print("FAIL: VNC framebuffer resolution is invalid.")
+              sys.exit(2)
+
+          # ???? ????? ????? ?? ??? ?????
+          if black_ratio >= 0.995:
+              print("FAIL: VNC FRAMEBUFFER IS BLACK.")
+              print("")
+              print("Screen Sharing is connected,")
+              print("but macOS is NOT sending the desktop image.")
+              print("")
+              print("Workflow will stop.")
+              sys.exit(3)
+
+          # ???? ????? ??????? ???? ?? ??????
+          if mean < 5 and stddev < 2:
+              print("FAIL: VNC framebuffer contains almost no visible image data.")
+              print("Workflow will stop.")
+              sys.exit(4)
+
+          # ???? ????? ??? ???? ???????
+          if stddev < 0.5:
+              print("FAIL: VNC framebuffer appears blank/uniform.")
+              sys.exit(5)
+
+          print("SUCCESS: VNC IS TRANSMITTING A REAL SCREEN IMAGE.")
+          print("Safe to continue to Tailscale.")
+          PY
+
+
+      # ========================================================
+      # ??? ????? ????:
+      # VNC ???? ???? ??????
+      # ========================================================
+
+      - name: Screen transmission verified
+        shell: bash
+        run: |
+          echo ""
+          echo "======================================================"
+          echo "      SCREEN TRANSMISSION VERIFIED SUCCESSFULLY"
+          echo "======================================================"
+          echo ""
+          echo "VNC returned an actual non-black framebuffer."
+          echo ""
+          echo "Connecting Tailscale now..."
+          echo ""
 
 
       # ========================================================
@@ -325,7 +501,7 @@ jobs:
 
 
       # ========================================================
-      # ?????? ??? IP
+      # Tailscale IP
       # ========================================================
 
       - name: Get Tailscale IP
@@ -334,8 +510,6 @@ jobs:
           set -e
 
           TAILSCALE_IP=""
-
-          echo "Waiting for Tailscale IP..."
 
           for i in {1..20}; do
 
@@ -349,16 +523,18 @@ jobs:
               break
             fi
 
-            echo "Waiting... ${i}/20"
+            echo "Waiting for Tailscale IP... ${i}/20"
             sleep 3
 
           done
 
 
           if [ -z "$TAILSCALE_IP" ]; then
-            echo "ERROR: Could not obtain Tailscale IPv4"
+
+            echo "ERROR: Could not obtain Tailscale IP."
             tailscale status || true
             exit 1
+
           fi
 
 
@@ -367,13 +543,10 @@ jobs:
           echo ""
           echo "Tailscale IP:"
           echo "$TAILSCALE_IP"
-          echo ""
-
-          tailscale status || true
 
 
       # ========================================================
-      # ??? ?????
+      # Final check
       # ========================================================
 
       - name: Final VNC check
@@ -381,47 +554,53 @@ jobs:
         run: |
           set -e
 
-          echo "Checking local VNC..."
-
           nc -vz 127.0.0.1 5900
 
           echo ""
-          echo "=========================================="
-          echo "VNC READY"
-          echo "=========================================="
+          echo "======================================================"
+          echo "                VNC FULLY VERIFIED"
+          echo "======================================================"
+          echo ""
+          echo "VNC server:           OK"
+          echo "VNC authentication:   OK"
+          echo "Framebuffer capture:  OK"
+          echo "Screen is not black:  OK"
+          echo "Tailscale:            OK"
           echo ""
           echo "Tailscale IP:"
           echo "${TAILSCALE_IP}"
           echo ""
-          echo "RVNC address:"
+          echo "RVNC Viewer address:"
           echo "${TAILSCALE_IP}:5900"
           echo ""
+          echo "======================================================"
 
 
       # ========================================================
-      # ????? ????????? ?? Summary
-      # ???? ????? ???? ????
+      # Summary
       # ========================================================
 
       - name: Write connection summary
         shell: bash
         run: |
           {
-            echo "# ? macOS VNC Session"
+            echo "# ? macOS VNC verified"
             echo ""
-            echo "## Connection"
+            echo "The workflow successfully captured the actual VNC framebuffer."
+            echo ""
+            echo "**Screen transmission:** ? PASS"
             echo ""
             echo "**Tailscale IP:**"
             echo ""
             echo "\`${TAILSCALE_IP}\`"
             echo ""
-            echo "**VNC address:**"
+            echo "**RVNC address:**"
             echo ""
             echo "\`${TAILSCALE_IP}:5900\`"
             echo ""
             echo "**Password:**"
             echo ""
-            echo "Use your GitHub secret **VNC_PASSWORD**"
+            echo "Use your GitHub Secret: \`VNC_PASSWORD\`"
             echo ""
             echo "**macOS:**"
             echo ""
@@ -438,7 +617,7 @@ jobs:
 
 
       # ========================================================
-      # ?????? ?????
+      # Session ready
       # ========================================================
 
       - name: Session ready
@@ -446,17 +625,16 @@ jobs:
         run: |
           echo ""
           echo "======================================================"
-          echo "             macOS VNC SESSION READY"
+          echo "           macOS VNC SESSION READY"
           echo "======================================================"
           echo ""
-          echo "Tailscale IP:"
-          echo "${TAILSCALE_IP}"
+          echo "Screen test: PASSED"
           echo ""
-          echo "VNC address:"
+          echo "Address:"
           echo "${TAILSCALE_IP}:5900"
           echo ""
           echo "Password:"
-          echo "Use the VNC_PASSWORD secret you created."
+          echo "Use your VNC_PASSWORD secret."
           echo ""
           echo "Duration:"
           echo "${SESSION_DURATION} hour(s)"
@@ -465,7 +643,7 @@ jobs:
 
 
       # ========================================================
-      # ????? ????? ????
+      # ????? ?????? ??????
       # ========================================================
 
       - name: Keep macOS session alive
@@ -479,6 +657,8 @@ jobs:
           INTERVAL=60
           ELAPSED=0
 
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
           echo "Keeping macOS alive for ${HOURS} hour(s)..."
 
           while [ "$ELAPSED" -lt "$TOTAL_SECONDS" ]; do
@@ -490,14 +670,12 @@ jobs:
 
 
             # -----------------------------------------------
-            # ??? VNC ???? ???? ??????
+            # VNC watchdog
             # -----------------------------------------------
 
             if ! nc -z 127.0.0.1 5900 2>/dev/null; then
 
               echo "VNC stopped - restarting..."
-
-              KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
               sudo launchctl enable \
                 system/com.apple.screensharing \
@@ -530,12 +708,7 @@ jobs:
             fi
 
 
-            # -----------------------------------------------
-            # ??? Tailscale
-            # -----------------------------------------------
-
             tailscale status >/dev/null 2>&1 || true
-
 
             sleep "$INTERVAL"
 
