@@ -40,13 +40,11 @@ on:
 permissions:
   contents: read
 
-
-# ============================================================
-# JOB 1
-# ????? ??? Runner ?????? ???? ??? runs-on expression ??????
-# ============================================================
-
 jobs:
+
+  # ============================================================
+  # ????? Runner
+  # ============================================================
 
   resolve-runner:
     name: Resolve macOS Runner
@@ -56,7 +54,6 @@ jobs:
       runner_label: ${{ steps.runner.outputs.label }}
 
     steps:
-
       - name: Select runner
         id: runner
         shell: bash
@@ -66,11 +63,7 @@ jobs:
           OS="${{ inputs.macos_version }}"
           SIZE="${{ inputs.runner_size }}"
 
-          echo "Requested macOS: $OS"
-          echo "Requested size:  $SIZE"
-
           case "$SIZE" in
-
             standard)
               LABEL="macos-${OS}"
               ;;
@@ -85,36 +78,30 @@ jobs:
 
             intel)
               if [ "$OS" != "26" ]; then
-                echo "ERROR:"
-                echo "The Intel option is supported here only with macOS 26."
-                echo "Choose macOS 26 + intel,"
-                echo "or use standard for macOS 14/15."
+                echo "ERROR: intel option is only supported here with macOS 26"
                 exit 1
               fi
-
               LABEL="macos-26-intel"
               ;;
 
             *)
-              echo "Unknown runner size: $SIZE"
+              echo "ERROR: Unknown runner size"
               exit 1
               ;;
           esac
 
-          echo "Selected runner: $LABEL"
-          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "Selected runner: ${LABEL}"
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
 
 
   # ============================================================
-  # JOB 2
   # macOS + VNC + Tailscale
   # ============================================================
 
   mac-vnc-session:
     name: macOS VNC via Tailscale
 
-    needs:
-      - resolve-runner
+    needs: resolve-runner
 
     runs-on: "${{ needs.resolve-runner.outputs.runner_label }}"
 
@@ -122,12 +109,44 @@ jobs:
 
     env:
       SESSION_DURATION: "${{ inputs.duration }}"
-      VNC_USER: "yourname"
 
     steps:
 
       # ========================================================
-      # ??????? ??????
+      # ??? Secrets
+      # ========================================================
+
+      - name: Validate secrets
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          set -e
+
+          if [ -z "$VNC_PASSWORD" ]; then
+            echo "ERROR: VNC_PASSWORD secret is missing"
+            exit 1
+          fi
+
+          if [ -z "$TAILSCALE_AUTH_KEY" ]; then
+            echo "ERROR: TAILSCALE_AUTH_KEY secret is missing"
+            exit 1
+          fi
+
+          LENGTH="${#VNC_PASSWORD}"
+
+          if [ "$LENGTH" -ne 8 ]; then
+            echo "ERROR: VNC_PASSWORD must be exactly 8 characters."
+            echo "Current length: $LENGTH"
+            exit 1
+          fi
+
+          echo "Secrets are configured."
+
+
+      # ========================================================
+      # ??????? ?????
       # ========================================================
 
       - name: System information
@@ -136,7 +155,6 @@ jobs:
           echo "=========================================="
           echo "macOS VNC Session"
           echo "=========================================="
-          echo ""
           sw_vers
           echo ""
           uname -a
@@ -144,61 +162,11 @@ jobs:
           echo "Architecture:"
           uname -m
           echo ""
-          echo "Requested duration: ${SESSION_DURATION} hour(s)"
-          echo "Runner: ${{ needs.resolve-runner.outputs.runner_label }}"
-
-
-      # ========================================================
-      # ????? ?????? ?????
-      # ========================================================
-
-      - name: Create VNC admin user
-        shell: bash
-        run: |
-          set -e
-
-          echo "Creating macOS administrator account..."
-
-          # ???? ???? ?????? macOS
-          LOCAL_PASSWORD="$(
-            openssl rand -base64 32 |
-            tr -dc 'A-Za-z0-9' |
-            head -c 14
-          )"
-
-          # VNC Legacy password ?????
-          # ????? 8 ???? ??????? ?? VNC ????????
-          VNC_PASSWORD="$(
-            openssl rand -base64 32 |
-            tr -dc 'A-Za-z0-9' |
-            head -c 8
-          )"
-
-          echo "::add-mask::$LOCAL_PASSWORD"
-          echo "::add-mask::$VNC_PASSWORD"
-
-          # ??? ???????? ??? ??? ??? ??????? ???? ????
-          if id "${VNC_USER}" >/dev/null 2>&1; then
-            sudo sysadminctl -deleteUser "${VNC_USER}" || true
-            sleep 2
-          fi
-
-          sudo sysadminctl \
-            -addUser "${VNC_USER}" \
-            -fullName "VNC User" \
-            -password "${LOCAL_PASSWORD}" \
-            -admin
-
-          sudo dseditgroup \
-            -o edit \
-            -a "${VNC_USER}" \
-            -t user \
-            admin || true
-
-          echo "LOCAL_PASSWORD=$LOCAL_PASSWORD" >> "$GITHUB_ENV"
-          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-
-          echo "User created: ${VNC_USER}"
+          echo "Runner:"
+          echo "${{ needs.resolve-runner.outputs.runner_label }}"
+          echo ""
+          echo "Requested duration:"
+          echo "${SESSION_DURATION} hour(s)"
 
 
       # ========================================================
@@ -207,24 +175,19 @@ jobs:
 
       - name: Enable macOS Screen Sharing and VNC
         shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           set -e
 
-          echo "Enabling macOS Screen Sharing..."
+          echo "::add-mask::$VNC_PASSWORD"
 
           KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
           SCREEN_PLIST="/System/Library/LaunchDaemons/com.apple.screensharing.plist"
 
-          if [ ! -f "$KICKSTART" ]; then
-            echo "ERROR: ARD kickstart not found:"
-            echo "$KICKSTART"
-            exit 1
-          fi
+          echo "Enabling Screen Sharing..."
 
-          # ----------------------------------------------------
-          # ????? Screen Sharing service
-          # ----------------------------------------------------
-
+          # ????? ???? Screen Sharing
           sudo launchctl enable \
             system/com.apple.screensharing \
             2>/dev/null || true
@@ -239,44 +202,27 @@ jobs:
             2>/dev/null || true
 
 
-          # ----------------------------------------------------
-          # ????? ???????? ??????? Remote Management
-          # ----------------------------------------------------
-
+          # ????? Apple Remote Desktop + VNC Legacy
           sudo "$KICKSTART" \
             -activate \
             -configure \
             -access -on \
-            -allowAccessFor -specifiedUsers \
-            -users "${VNC_USER}" \
+            -allowAccessFor -allUsers \
             -privs -all \
             -clientopts \
             -setvnclegacy \
             -vnclegacy yes \
             -clientopts \
             -setvncpw \
-            -vncpw "${VNC_PASSWORD}" \
+            -vncpw "$VNC_PASSWORD" \
             -restart \
-            -agent
+            -agent \
+            -menu
 
 
-          # ----------------------------------------------------
-          # ????? ???????? ??????? Screen Sharing
-          # ----------------------------------------------------
-
-          sudo dseditgroup \
-            -o edit \
-            -a "${VNC_USER}" \
-            -t user \
-            com.apple.access_screensharing \
-            2>/dev/null || true
-
-
-          # ----------------------------------------------------
-          # macOS 14:
-          # ?????? ??? Screen Sharing ?????? ????? ???????
-          # ??? GitHub hosted runner
-          # ----------------------------------------------------
+          # ====================================================
+          # ?????? ????? Screen Sharing ????????? ??? macOS 14
+          # ====================================================
 
           MACOS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
 
@@ -288,75 +234,26 @@ jobs:
 
             if [ -f "$TCC_DB" ]; then
 
-              EPOCH="$(date +%s)"
+              NOW="$(date +%s)"
 
               sudo sqlite3 "$TCC_DB" "
-                DELETE FROM access
-                WHERE client = 'com.apple.screensharing.agent'
-                AND service IN (
-                  'kTCCServicePostEvent',
-                  'kTCCServiceScreenCapture'
-                );
+              DELETE FROM access
+              WHERE client='com.apple.screensharing.agent'
+              AND service='kTCCServiceScreenCapture';
+              " 2>/dev/null || true
 
-                INSERT INTO access(
-                  service,
-                  client,
-                  client_type,
-                  auth_value,
-                  auth_reason,
-                  auth_version,
-                  indirect_object_identifier_type,
-                  flags,
-                  last_modified,
-                  last_reminded
-                )
-                VALUES(
-                  'kTCCServicePostEvent',
-                  'com.apple.screensharing.agent',
-                  0,
-                  2,
-                  4,
-                  1,
-                  0,
-                  0,
-                  ${EPOCH},
-                  ${EPOCH}
-                );
-
-                INSERT INTO access(
-                  service,
-                  client,
-                  client_type,
-                  auth_value,
-                  auth_reason,
-                  auth_version,
-                  indirect_object_identifier_type,
-                  flags,
-                  last_modified,
-                  last_reminded
-                )
-                VALUES(
-                  'kTCCServiceScreenCapture',
-                  'com.apple.screensharing.agent',
-                  0,
-                  2,
-                  4,
-                  1,
-                  0,
-                  0,
-                  ${EPOCH},
-                  ${EPOCH}
-                );
-              " || true
+              sudo sqlite3 "$TCC_DB" "
+              DELETE FROM access
+              WHERE client='com.apple.screensharing.agent'
+              AND service='kTCCServicePostEvent';
+              " 2>/dev/null || true
 
             fi
+
           fi
 
 
-          # ----------------------------------------------------
-          # ????? ????? Screen Sharing
-          # ----------------------------------------------------
-
+          # ????? ????? ???????
           sudo launchctl kickstart \
             -k \
             system/com.apple.screensharing \
@@ -367,29 +264,30 @@ jobs:
             -agent \
             2>/dev/null || true
 
+
+          echo "Waiting for VNC..."
+
           sleep 8
 
 
-          # ----------------------------------------------------
-          # ?????? ?? Port 5900
-          # ----------------------------------------------------
+          # ??? TCP 5900
+          SUCCESS=0
 
-          echo ""
-          echo "Checking VNC TCP/5900..."
-
-          for i in {1..15}; do
+          for i in {1..20}; do
 
             if nc -z 127.0.0.1 5900 2>/dev/null; then
-              echo "SUCCESS: VNC is listening on TCP 5900"
+              SUCCESS=1
+              echo "SUCCESS: VNC is listening on TCP port 5900"
               break
             fi
 
-            echo "Waiting for VNC... ($i/15)"
+            echo "Waiting for VNC... ${i}/20"
             sleep 2
+
           done
 
 
-          if ! nc -z 127.0.0.1 5900 2>/dev/null; then
+          if [ "$SUCCESS" -ne 1 ]; then
 
             echo ""
             echo "ERROR: VNC did not start."
@@ -400,6 +298,7 @@ jobs:
               2>/dev/null || true
 
             echo ""
+
             sudo lsof \
               -nP \
               -iTCP \
@@ -418,7 +317,7 @@ jobs:
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
-          hostname: gh-vnc-${{ github.run_id }}
+          hostname: gh-mac-vnc-${{ github.run_id }}
           version: latest
           timeout: 3m
           retry: 5
@@ -426,7 +325,7 @@ jobs:
 
 
       # ========================================================
-      # ??? IP ??? Tailscale
+      # ?????? ??? IP
       # ========================================================
 
       - name: Get Tailscale IP
@@ -434,9 +333,9 @@ jobs:
         run: |
           set -e
 
-          echo "Waiting for Tailscale IPv4 address..."
-
           TAILSCALE_IP=""
+
+          echo "Waiting for Tailscale IP..."
 
           for i in {1..20}; do
 
@@ -450,128 +349,96 @@ jobs:
               break
             fi
 
-            echo "Waiting... ($i/20)"
+            echo "Waiting... ${i}/20"
             sleep 3
+
           done
 
+
           if [ -z "$TAILSCALE_IP" ]; then
-            echo "ERROR: Could not obtain Tailscale IP"
+            echo "ERROR: Could not obtain Tailscale IPv4"
             tailscale status || true
             exit 1
           fi
 
+
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> "$GITHUB_ENV"
 
           echo ""
-          echo "=========================================="
-          echo "Tailscale connected"
-          echo "IP: $TAILSCALE_IP"
-          echo "=========================================="
+          echo "Tailscale IP:"
+          echo "$TAILSCALE_IP"
+          echo ""
 
           tailscale status || true
 
 
       # ========================================================
-      # ?????? VNC ??? ?????
+      # ??? ?????
       # ========================================================
 
       - name: Final VNC check
         shell: bash
         run: |
-          echo "Local VNC test..."
+          set -e
 
-          if nc -z 127.0.0.1 5900; then
-            echo "VNC local port: OK"
-          else
-            echo "ERROR: TCP 5900 stopped"
-            exit 1
-          fi
+          echo "Checking local VNC..."
+
+          nc -vz 127.0.0.1 5900
 
           echo ""
-          echo "Tailscale IP: ${TAILSCALE_IP}"
-          echo "VNC port:     5900"
+          echo "=========================================="
+          echo "VNC READY"
+          echo "=========================================="
           echo ""
-          echo "RVNC / RealVNC address:"
+          echo "Tailscale IP:"
+          echo "${TAILSCALE_IP}"
+          echo ""
+          echo "RVNC address:"
           echo "${TAILSCALE_IP}:5900"
+          echo ""
 
 
       # ========================================================
-      # ??? ??????? ???????
+      # ????? ????????? ?? Summary
+      # ???? ????? ???? ????
       # ========================================================
 
-      - name: Create connection information
+      - name: Write connection summary
         shell: bash
         run: |
-          mkdir -p credentials
-
-          cat > credentials/connection-info.txt << EOF
-          ============================================================
-                      macOS VNC via Tailscale
-          ============================================================
-
-          Tailscale IP:
-          ${TAILSCALE_IP}
-
-          VNC address:
-          ${TAILSCALE_IP}:5900
-
-          ------------------------------------------------------------
-
-          VNC Legacy Password:
-          ${VNC_PASSWORD}
-
-          ------------------------------------------------------------
-
-          macOS Username:
-          ${VNC_USER}
-
-          macOS User Password:
-          ${LOCAL_PASSWORD}
-
-          ------------------------------------------------------------
-
-          iPhone RVNC / RealVNC Viewer:
-
-          Address:
-          ${TAILSCALE_IP}:5900
-
-          First try:
-          VNC password = ${VNC_PASSWORD}
-
-          If macOS asks for normal user credentials:
-
-          Username = ${VNC_USER}
-          Password = ${LOCAL_PASSWORD}
-
-          ------------------------------------------------------------
-
-          Selected macOS:
-          ${{ inputs.macos_version }}
-
-          Runner:
-          ${{ needs.resolve-runner.outputs.runner_label }}
-
-          Session duration:
-          ${SESSION_DURATION} hour(s)
-
-          ============================================================
-          EOF
-
-          chmod 600 credentials/connection-info.txt
-
-
-      - name: Upload VNC credentials
-        uses: actions/upload-artifact@v4
-        with:
-          name: vnc-credentials-${{ github.run_id }}
-          path: credentials/connection-info.txt
-          retention-days: 1
-          if-no-files-found: error
+          {
+            echo "# ? macOS VNC Session"
+            echo ""
+            echo "## Connection"
+            echo ""
+            echo "**Tailscale IP:**"
+            echo ""
+            echo "\`${TAILSCALE_IP}\`"
+            echo ""
+            echo "**VNC address:**"
+            echo ""
+            echo "\`${TAILSCALE_IP}:5900\`"
+            echo ""
+            echo "**Password:**"
+            echo ""
+            echo "Use your GitHub secret **VNC_PASSWORD**"
+            echo ""
+            echo "**macOS:**"
+            echo ""
+            echo "\`${{ inputs.macos_version }}\`"
+            echo ""
+            echo "**Runner:**"
+            echo ""
+            echo "\`${{ needs.resolve-runner.outputs.runner_label }}\`"
+            echo ""
+            echo "**Duration:**"
+            echo ""
+            echo "\`${SESSION_DURATION} hour(s)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
 
       # ========================================================
-      # ??? ????????? ?? Logs
-      # ???? ???? ?? ??????
+      # ?????? ?????
       # ========================================================
 
       - name: Session ready
@@ -588,30 +455,28 @@ jobs:
           echo "VNC address:"
           echo "${TAILSCALE_IP}:5900"
           echo ""
-          echo "Username:"
-          echo "${VNC_USER}"
+          echo "Password:"
+          echo "Use the VNC_PASSWORD secret you created."
           echo ""
-          echo "Passwords:"
-          echo "Download the vnc-credentials artifact."
-          echo ""
-          echo "Session duration:"
+          echo "Duration:"
           echo "${SESSION_DURATION} hour(s)"
           echo ""
           echo "======================================================"
 
 
       # ========================================================
-      # ????? ????? ?????
+      # ????? ????? ????
       # ========================================================
 
       - name: Keep macOS session alive
         shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
-          set -e
-
           HOURS="${SESSION_DURATION}"
+
           TOTAL_SECONDS=$((HOURS * 3600))
-          INTERVAL=300
+          INTERVAL=60
           ELAPSED=0
 
           echo "Keeping macOS alive for ${HOURS} hour(s)..."
@@ -621,12 +486,18 @@ jobs:
             REMAINING=$((TOTAL_SECONDS - ELAPSED))
             REMAINING_MIN=$((REMAINING / 60))
 
-            echo "Session alive ? approximately ${REMAINING_MIN} minutes remaining"
+            echo "Session alive - approximately ${REMAINING_MIN} minutes remaining"
 
-            # ?? Screen Sharing ???? ????? ?????
+
+            # -----------------------------------------------
+            # ??? VNC ???? ???? ??????
+            # -----------------------------------------------
+
             if ! nc -z 127.0.0.1 5900 2>/dev/null; then
 
-              echo "VNC stopped - restarting Screen Sharing..."
+              echo "VNC stopped - restarting..."
+
+              KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
               sudo launchctl enable \
                 system/com.apple.screensharing \
@@ -637,10 +508,39 @@ jobs:
                 system/com.apple.screensharing \
                 2>/dev/null || true
 
+              sudo "$KICKSTART" \
+                -activate \
+                -configure \
+                -access -on \
+                -allowAccessFor -allUsers \
+                -privs -all \
+                -clientopts \
+                -setvnclegacy \
+                -vnclegacy yes \
+                -clientopts \
+                -setvncpw \
+                -vncpw "$VNC_PASSWORD" \
+                -restart \
+                -agent \
+                -menu \
+                2>/dev/null || true
+
+              sleep 5
+
             fi
 
+
+            # -----------------------------------------------
+            # ??? Tailscale
+            # -----------------------------------------------
+
+            tailscale status >/dev/null 2>&1 || true
+
+
             sleep "$INTERVAL"
+
             ELAPSED=$((ELAPSED + INTERVAL))
+
           done
 
-          echo "Requested session duration completed."
+          echo "Session duration completed."
