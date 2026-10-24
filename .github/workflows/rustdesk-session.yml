@@ -46,7 +46,7 @@ on:
           - 'true'
 
 env:
-  SESSION_DURATION: 15
+  SESSION_DURATION: 5
 
 jobs:
   mac-rustdesk-session:
@@ -64,21 +64,6 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔬 Network before Tailscale
-        run: |
-          echo "===== BEFORE TAILSCALE ====="
-          echo "--- resolv.conf ---"
-          cat /etc/resolv.conf 2>&1
-          echo "--- scutil dns ---"
-          scutil --dns 2>&1 | head -14
-          echo "--- resolve test ---"
-          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -4) || true
-          echo "--- direct IP tests ---"
-          (ping -c 2 -t 4 1.1.1.1 2>&1 | tail -3) || true
-          (nc -z -v -G 4 1.1.1.1 443 2>&1 | tail -2) || true
-          (dig +short +time=4 +tries=1 @1.1.1.1 example.com 2>&1 | head -2) || true
-          echo "===== END BEFORE ====="
-
       - name: 🔗 Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -87,28 +72,11 @@ jobs:
 
       - name: 🔧 Restore DNS after Tailscale
         run: |
-          echo "===== AFTER TAILSCALE ====="
-          echo "--- scutil ---"
-          scutil --dns 2>&1 | head -10
-          echo "--- resolve ---"
-          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -3) || true
-          echo "--- ping ---"
-          (ping -c 2 -t 4 1.1.1.1 2>&1 | tail -2) || true
-          echo "--- tailscale ---"
-          (tailscale status 2>&1 | head -5) || echo "no tailscale CLI"
-          echo "===== RESTORING DNS ====="
           for svc in "Wi-Fi" "Ethernet" "USB 10/100/1000 LAN" "Thunderbolt Bridge"; do
-            if networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 2>/dev/null; then
-              echo "✅ DNS restored on $svc"
-            fi
+            networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 2>/dev/null || true
           done
           dscacheutil -flushcache 2>/dev/null || true
           killall -HUP mDNSResponder 2>/dev/null || true
-          sleep 2
-          echo "--- verify ---"
-          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -3) || true
-          (curl -s --max-time 8 https://api.ipify.org 2>&1 | head -2) || true
-          echo "===== END AFTER ====="
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
@@ -120,16 +88,6 @@ jobs:
 
       - name: 🌐 Detect and Track IP
         run: |
-          echo "===== NETWORK DIAGNOSTICS ====="
-          echo "--- tailscale ---"
-          /Applications/Tailscale.app/Contents/MacOS/Tailscale status 2>&1 | head -8 || tailscale status 2>&1 | head -8 || echo "no tailscale CLI"
-          echo "--- interfaces ---"
-          ifconfig 2>/dev/null | grep -E "^[a-z]|inet " | grep -v "127.0.0.1" | head -12
-          echo "--- route to internet ---"
-          route -n get default 2>&1 | head -4
-          echo "--- plain curl, full output ---"
-          curl -v --max-time 8 https://api.ipify.org 2>&1 | tail -12
-          echo "===== END DIAGNOSTICS ====="
           chmod +x scripts/ip-manager.sh
           ./scripts/ip-manager.sh
 
