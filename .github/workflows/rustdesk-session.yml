@@ -85,6 +85,31 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           args: --accept-dns=false
 
+      - name: 🔧 Restore DNS after Tailscale
+        run: |
+          echo "===== AFTER TAILSCALE ====="
+          echo "--- scutil ---"
+          scutil --dns 2>&1 | head -10
+          echo "--- resolve ---"
+          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -3) || true
+          echo "--- ping ---"
+          (ping -c 2 -t 4 1.1.1.1 2>&1 | tail -2) || true
+          echo "--- tailscale ---"
+          (tailscale status 2>&1 | head -5) || echo "no tailscale CLI"
+          echo "===== RESTORING DNS ====="
+          for svc in "Wi-Fi" "Ethernet" "USB 10/100/1000 LAN" "Thunderbolt Bridge"; do
+            if networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 2>/dev/null; then
+              echo "✅ DNS restored on $svc"
+            fi
+          done
+          dscacheutil -flushcache 2>/dev/null || true
+          killall -HUP mDNSResponder 2>/dev/null || true
+          sleep 2
+          echo "--- verify ---"
+          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -3) || true
+          (curl -s --max-time 8 https://api.ipify.org 2>&1 | head -2) || true
+          echo "===== END AFTER ====="
+
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
         with:
