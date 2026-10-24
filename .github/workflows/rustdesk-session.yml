@@ -68,6 +68,7 @@ jobs:
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          args: --accept-dns=false
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
