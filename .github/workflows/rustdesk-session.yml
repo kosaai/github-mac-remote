@@ -64,6 +64,21 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
+      - name: 🔬 Network before Tailscale
+        run: |
+          echo "===== BEFORE TAILSCALE ====="
+          echo "--- resolv.conf ---"
+          cat /etc/resolv.conf 2>&1
+          echo "--- scutil dns ---"
+          scutil --dns 2>&1 | head -14
+          echo "--- resolve test ---"
+          (dscacheutil -q host -a name api.ipify.org 2>&1 | head -4) || true
+          echo "--- direct IP tests ---"
+          (ping -c 2 -t 4 1.1.1.1 2>&1 | tail -3) || true
+          (nc -z -v -G 4 1.1.1.1 443 2>&1 | tail -2) || true
+          (dig +short +time=4 +tries=1 @1.1.1.1 example.com 2>&1 | head -2) || true
+          echo "===== END BEFORE ====="
+
       - name: 🔗 Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
