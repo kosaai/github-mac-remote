@@ -2,7 +2,7 @@
 # IP Manager - Detects, tracks, and ensures unique IPs
 # Part of GitHub Mac Remote
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -13,8 +13,27 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-IP_HISTORY_FILE="${GITHUB_WORKSPACE}/.ip-history.json"
-IP_CACHE_KEY="ip-history-${GITHUB_REPOSITORY_OWNER}"
+IP_HISTORY_FILE="${GITHUB_WORKSPACE:-$PWD}/.ip-history.json"
+IP_CACHE_KEY="ip-history-${GITHUB_REPOSITORY_OWNER:-unknown}"
+
+# GitHub exposes these; default them so the script also runs outside Actions.
+GITHUB_ENV="${GITHUB_ENV:-/dev/null}"
+GITHUB_ACTOR="${GITHUB_ACTOR:-unknown}"
+GITHUB_RUN_ID="${GITHUB_RUN_ID:-local}"
+
+# Endpoints that answer with the bare public IP, one per line.
+# api.ipify.org is used for both the plain and the JSON form so a network
+# that allows one shape but not the other still works.
+IP_ENDPOINTS=(
+    "https://api.ipify.org"
+    "https://api.ipify.org?format=json"
+    "https://ifconfig.me/ip"
+    "https://ifconfig.me"
+    "https://icanhazip.com"
+    "https://ipecho.net/plain"
+    "https://checkip.amazonaws.com"
+    "https://ipinfo.io/ip"
+)
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
@@ -22,17 +41,27 @@ echo -e "${CYAN}║                    🌐 IP MANAGER                          
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
+# Pull the first token out of a response that may be either the bare IP
+# or a JSON object such as {"ip":"203.0.113.7"}.
+extract_ip() {
+    local body="${1//[$'\r\n\t']/ }"
+    local found=""
+    found="$(printf '%s' "$body" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | head -1 || true)"
+    printf '%s' "$found"
+}
+
 # Function to get public IP
 get_public_ip() {
-    local ip=""
-    
-    # Try multiple services for reliability
-    ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null) || \
-    ip=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null) || \
-    ip=$(curl -s --max-time 5 https://icanhazip.com 2>/dev/null) || \
-    ip=$(curl -s --max-time 5 https://ipecho.net/plain 2>/dev/null)
-    
-    echo "$ip"
+    local url body candidate
+    for url in "${IP_ENDPOINTS[@]}"; do
+        body="$(curl -fsSL --max-time 8 "$url" 2>/dev/null || true)"
+        candidate="$(extract_ip "$body")"
+        if [ -n "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Function to get IP details
