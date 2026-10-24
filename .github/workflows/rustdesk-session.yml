@@ -46,7 +46,7 @@ on:
           - 'true'
 
 env:
-  SESSION_DURATION: ${{ github.event.inputs.duration }}
+  SESSION_DURATION: 15
 
 jobs:
   mac-rustdesk-session:
@@ -79,16 +79,17 @@ jobs:
 
       - name: 🌐 Detect and Track IP
         run: |
-          chmod +x scripts/ip-manager.sh
-          echo "===== DIAGNOSTICS ====="
-          echo "cwd: $(pwd)"
-          echo "shell: $BASH_VERSION"
-          echo "script exists: $(ls -l scripts/ip-manager.sh 2>&1)"
-          echo "--- bash -n (syntax) ---"
-          bash -n scripts/ip-manager.sh && echo "syntax OK" || echo "SYNTAX FAIL"
-          echo "--- xtrace ---"
-          bash -x scripts/ip-manager.sh 2>&1 | tail -40
+          echo "===== NETWORK DIAGNOSTICS ====="
+          echo "--- tailscale ---"
+          /Applications/Tailscale.app/Contents/MacOS/Tailscale status 2>&1 | head -8 || tailscale status 2>&1 | head -8 || echo "no tailscale CLI"
+          echo "--- interfaces ---"
+          ifconfig 2>/dev/null | grep -E "^[a-z]|inet " | grep -v "127.0.0.1" | head -12
+          echo "--- route to internet ---"
+          route -n get default 2>&1 | head -4
+          echo "--- plain curl, full output ---"
+          curl -v --max-time 8 https://api.ipify.org 2>&1 | tail -12
           echo "===== END DIAGNOSTICS ====="
+          chmod +x scripts/ip-manager.sh
           ./scripts/ip-manager.sh
 
       - name: 🔒 Setup Unique IP (Cloudflare WARP)
