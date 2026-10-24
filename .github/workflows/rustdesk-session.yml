@@ -64,6 +64,11 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
+      - name: 🔗 Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
         with:
