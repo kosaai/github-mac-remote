@@ -80,6 +80,15 @@ jobs:
       - name: 🌐 Detect and Track IP
         run: |
           chmod +x scripts/ip-manager.sh
+          echo "===== DIAGNOSTICS ====="
+          echo "cwd: $(pwd)"
+          echo "shell: $BASH_VERSION"
+          echo "script exists: $(ls -l scripts/ip-manager.sh 2>&1)"
+          echo "--- bash -n (syntax) ---"
+          bash -n scripts/ip-manager.sh && echo "syntax OK" || echo "SYNTAX FAIL"
+          echo "--- xtrace ---"
+          bash -x scripts/ip-manager.sh 2>&1 | tail -40
+          echo "===== END DIAGNOSTICS ====="
           ./scripts/ip-manager.sh
 
       - name: 🔒 Setup Unique IP (Cloudflare WARP)
