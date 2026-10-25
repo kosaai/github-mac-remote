@@ -79,6 +79,29 @@ jobs:
           dscacheutil -flushcache 2>/dev/null || true
           killall -HUP mDNSResponder 2>/dev/null || true
 
+      # Added: make Chrome available before Hermes setup.
+      - name: 🌐 Install Google Chrome
+        run: |
+          set -e
+
+          if [ -d "/Applications/Google Chrome.app" ]; then
+            echo "Google Chrome is already installed."
+          else
+            if ! command -v brew >/dev/null 2>&1; then
+              echo "::error::Homebrew is not available; cannot install Google Chrome."
+              exit 1
+            fi
+
+            brew install --cask google-chrome
+          fi
+
+          if [ ! -d "/Applications/Google Chrome.app" ]; then
+            echo "::error::Google Chrome installation failed."
+            exit 1
+          fi
+
+          echo "Google Chrome is ready."
+
       - name: 🤖 Hermes Agent + Hermex
         run: |
           chmod +x scripts/setup-hermes.sh
@@ -223,6 +246,102 @@ jobs:
             echo "⚠️ RustDesk executable not found"
             echo "RUSTDESK_ID=Check_Logs" >> $GITHUB_ENV
           fi
+
+      # Added: launch portal authentication in a separate Terminal window.
+      # The GitHub Actions step does not wait for the interactive login to finish.
+      - name: 🔐 Start Hermes Portal Authentication
+        run: |
+          set -e
+
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+          DESKTOP="$HOME/Desktop"
+          AUTH_SCRIPT="$DESKTOP/start-hermes-auth.sh"
+          AUTH_LOG="$DESKTOP/Hermes-Auth.log"
+          INSTRUCTIONS="$DESKTOP/Hermes-Authentication-Instructions.txt"
+
+          mkdir -p "$DESKTOP"
+
+          if ! command -v hermes >/dev/null 2>&1; then
+            echo "::error::Hermes CLI is not installed or not on PATH."
+            exit 1
+          fi
+
+          if [ ! -d "/Applications/Google Chrome.app" ]; then
+            echo "::error::Google Chrome is not installed."
+            exit 1
+          fi
+
+          if [ ! -d "/Applications/RustDesk.app" ]; then
+            echo "::error::RustDesk.app was not found."
+            exit 1
+          fi
+
+          cat > "$INSTRUCTIONS" <<'EOF'
+          HERMES PORTAL AUTHENTICATION
+
+          1. Connect to this Mac using RustDesk.
+          2. Find the Terminal window for Hermes Portal Authentication.
+          3. Complete the Nous Portal login in Google Chrome.
+          4. Return to Terminal and finish any setup/model selection prompts.
+          5. Check Hermes-Auth.log on the Desktop if setup fails.
+
+          Keep authentication tokens private. Do not share the log publicly.
+          EOF
+
+          cat > "$AUTH_SCRIPT" <<'AUTH_EOF'
+          #!/bin/bash
+
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          export BROWSER='open -a "Google Chrome" %s'
+
+          LOG="$HOME/Desktop/Hermes-Auth.log"
+
+          echo "========================================" >> "$LOG"
+          echo "Hermes Portal authentication started: $(date)" >> "$LOG"
+          echo "========================================" >> "$LOG"
+
+          # Open Chrome on the Mac before starting the official interactive setup.
+          open -a "Google Chrome" 2>&1 | tee -a "$LOG" || true
+
+          echo ""
+          echo "Starting the official Hermes Portal setup..."
+          echo "Complete the browser login, then return to this Terminal window."
+          echo ""
+
+          hermes setup --portal 2>&1 | tee -a "$LOG"
+          RESULT=${PIPESTATUS[0]}
+
+          if [ "$RESULT" -eq 0 ]; then
+            echo ""
+            echo "Hermes Portal setup command completed." | tee -a "$LOG"
+            hermes portal info 2>&1 | tee -a "$LOG" || true
+          else
+            echo ""
+            echo "Hermes setup exited with code $RESULT." | tee -a "$LOG"
+          fi
+
+          echo ""
+          echo "Authentication terminal remains open."
+          read -r -p "Press Enter to close this Terminal session: "
+          AUTH_EOF
+
+          chmod +x "$AUTH_SCRIPT"
+
+          echo "Preparing to open the interactive authentication window..."
+
+          # Launch the command in Terminal without blocking this Actions step.
+          osascript <<'APPLESCRIPT'
+          tell application "Terminal"
+            activate
+            do script "bash \"$HOME/Desktop/start-hermes-auth.sh\""
+          end tell
+          APPLESCRIPT
+
+          echo "Authentication was launched in a separate Terminal window."
+          echo "Instructions: $INSTRUCTIONS"
+          echo "Log file: $AUTH_LOG"
+          echo "Connect with RustDesk and complete the login on the Mac."
 
       - name: 💾 Save Credentials (Private File)
         run: |
