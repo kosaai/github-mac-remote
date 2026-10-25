@@ -1,72 +1,79 @@
-
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-echo "========================================"
-echo " Hermes Agent - Installation Only"
-echo "========================================"
-
-# 1. Verify the operating system
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "ERROR: This installer requires macOS."
-  exit 1
-fi
-
-echo "[1/5] macOS detected"
-sw_vers
-
-# 2. Verify required tools
-for tool in git curl bash; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "ERROR: Required tool is missing: $tool"
-    exit 1
-  fi
-done
-
-echo "[2/5] Required tools are available"
-git --version
-curl --version | head -n 1
-
-# 3. Download the official installer
-INSTALLER="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/hermes-official-install.sh"
-
-echo "[3/5] Downloading the official Hermes installer..."
-curl --fail --show-error --silent --location \
-  --connect-timeout 20 \
-  --max-time 180 \
-  https://hermes-agent.nousresearch.com/install.sh \
-  --output "$INSTALLER"
-
-if [[ ! -s "$INSTALLER" ]]; then
-  echo "ERROR: The downloaded installer is empty."
-  exit 1
-fi
-
-# 4. Install Hermes
-echo "[4/5] Running the official installer..."
-bash "$INSTALLER"
-
-# Make Hermes available in subsequent GitHub Actions steps.
 export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
 
-if [[ -n "${GITHUB_PATH:-}" ]]; then
-  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-  echo "$HOME/.hermes/bin" >> "$GITHUB_PATH"
-fi
+DESKTOP="$HOME/Desktop"
+mkdir -p "$DESKTOP"
+LOG="$DESKTOP/Hermes-Install-Auth.log"
+exec > >(tee -a "$LOG") 2>&1
 
-# 5. Verify the actual installation
-echo "[5/5] Verifying Hermes..."
+echo "=== Hermes installation and authentication ==="
+date
 
-if ! command -v hermes >/dev/null 2>&1; then
-  echo "ERROR: Installation finished, but the hermes command was not found."
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "ERROR: This script requires macOS."
   exit 1
 fi
 
-if ! hermes --version; then
-  echo "ERROR: Hermes is installed but its version check failed."
+# Check the required Git dependency.
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: Git is missing. Install Apple's Command Line Tools first."
+  exit 1
+fi
+
+# Install Hermes only if the CLI is not already available.
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "Installing Hermes from the official installer..."
+  curl -fsSL --connect-timeout 20 --max-time 300 \
+    https://hermes-agent.nousresearch.com/install.sh \
+    -o "${TMPDIR:-/tmp}/hermes-install.sh"
+  bash "${TMPDIR:-/tmp}/hermes-install.sh"
+  export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+fi
+
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "ERROR: Hermes CLI was not found after installation."
+  exit 1
+fi
+
+echo "Hermes version:"
+hermes --version
+
+# Try to open Chrome explicitly if installed.
+open_chrome() {
+  local url="$1"
+  if [[ -d "/Applications/Google Chrome.app" ]]; then
+    open -a "Google Chrome" "$url" || true
+  elif [[ -d "$HOME/Applications/Google Chrome.app" ]]; then
+    open -a "$HOME/Applications/Google Chrome.app" "$url" || true
+  else
+    echo "Chrome app not found in standard Applications folders."
+    echo "Hermes may use the macOS default browser instead."
+  fi
+}
+
+echo "Opening the Nous Portal subscription page in Chrome..."
+open_chrome "https://portal.nousresearch.com/manage-subscription"
+
+echo ""
+echo "Starting official Hermes Portal setup."
+echo "Complete the login and model selection in the browser/terminal."
+echo "If OAuth opens a URL, use Chrome on this Mac runner."
+echo ""
+
+# The official command performs OAuth and provider setup.
+hermes setup --portal
+
+echo ""
+echo "Checking Portal authentication status..."
+if hermes portal info; then
+  echo "Portal status command completed."
+else
+  echo "WARNING: Portal status did not confirm authentication."
+  echo "Check the output above and this log: $LOG"
   exit 1
 fi
 
 echo ""
-echo "SUCCESS: Hermes Agent is installed and its CLI responds."
-echo "No authentication, server, or Tailscale changes were made."
+echo "Finished. Log saved at: $LOG"
