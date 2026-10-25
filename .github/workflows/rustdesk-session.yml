@@ -46,7 +46,6 @@ on:
           - 'true'
 
 env:
-  # Honour the workflow_dispatch 'duration' input (1-6 hours), fall back to 5.
   SESSION_DURATION: ${{ github.event.inputs.duration || 5 }}
 
 jobs:
@@ -79,7 +78,6 @@ jobs:
           dscacheutil -flushcache 2>/dev/null || true
           killall -HUP mDNSResponder 2>/dev/null || true
 
-      # Added: make Chrome available before Hermes setup.
       - name: 🌐 Install Google Chrome
         run: |
           set -e
@@ -91,7 +89,6 @@ jobs:
               echo "::error::Homebrew is not available; cannot install Google Chrome."
               exit 1
             fi
-
             brew install --cask google-chrome
           fi
 
@@ -104,26 +101,45 @@ jobs:
 
       - name: 🤖 Hermes Agent + Hermex
         run: |
-          chmod +x scripts/setup-hermes.sh
+          set -e
+
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
           export HERMES_PORT="${HERMES_PORT:-9119}"
-          ./scripts/setup-hermes.sh
+
+          if ! command -v hermes >/dev/null 2>&1; then
+            echo "Installing Hermes Agent..."
+            curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+            export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          fi
+
+          if ! command -v hermes >/dev/null 2>&1; then
+            echo "::error::Hermes installation failed or the CLI is not on PATH."
+            exit 1
+          fi
+
+          echo "Hermes CLI is installed."
+
+          HERMEX_DIR="$HOME/Desktop/hermex"
+          mkdir -p "$HOME/Desktop"
+
+          if [ ! -d "$HERMEX_DIR" ]; then
+            git clone https://github.com/kosaai/hermex.git "$HERMEX_DIR"
+          else
+            echo "Hermex directory already exists."
+          fi
+
           if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
             TS_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
           else
             TS_CLI="tailscale"
           fi
-          HERMES_URL=$("$TS_CLI" serve status 2>/dev/null \
-            | grep -oE 'https://[^[:space:]]+' \
-            | grep -E ":${HERMES_PORT}([[:space:]]|$)" \
-            | head -1)
-          TAILSCALE_IP=$("$TS_CLI" ip -4 2>/dev/null | head -1)
-          echo "HERMES_URL=${HERMES_URL}" >> $GITHUB_ENV
-          echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
-          if [ -z "${HERMES_URL}" ]; then
-            echo "::warning::Could not read the Tailscale serve URL for port ${HERMES_PORT}"
-          fi
-          echo "Hermes:   ${HERMES_URL:-'(see logs)'}"
-          echo "Tailnet:  ${TAILSCALE_IP:-'(unavailable)'}"
+
+          TAILSCALE_IP=$("$TS_CLI" ip -4 2>/dev/null | head -1 || true)
+          echo "TAILSCALE_IP=${TAILSCALE_IP}" >> "$GITHUB_ENV"
+          echo "HERMES_URL=" >> "$GITHUB_ENV"
+
+          echo "Hermes is installed; Portal authentication will start after RustDesk setup."
+          echo "Tailnet: ${TAILSCALE_IP:-'(unavailable)'}"
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
@@ -147,18 +163,18 @@ jobs:
       - name: 🔐 Create Admin User for GUI Authentication
         run: |
           ADMIN_USER="yourname"
-          echo "MAC_USER=${ADMIN_USER}" >> $GITHUB_ENV
+          echo "MAC_USER=${ADMIN_USER}" >> "$GITHUB_ENV"
 
           MAC_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
 
           echo "::add-mask::${MAC_PASSWORD}"
-          echo "MAC_PASSWORD=${MAC_PASSWORD}" >> $GITHUB_ENV
+          echo "MAC_PASSWORD=${MAC_PASSWORD}" >> "$GITHUB_ENV"
 
           echo "👤 Creating admin user: ${ADMIN_USER}"
 
           if id "${ADMIN_USER}" &>/dev/null; then
             echo "User ${ADMIN_USER} already exists, setting password..."
-            sudo dscl . -passwd /Users/${ADMIN_USER} "" "${MAC_PASSWORD}" 2>/dev/null || \
+            sudo dscl . -passwd "/Users/${ADMIN_USER}" "" "${MAC_PASSWORD}" 2>/dev/null || \
             sudo sysadminctl -resetPasswordFor "${ADMIN_USER}" -newPassword "${MAC_PASSWORD}" 2>/dev/null || true
           else
             LAST_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
@@ -166,32 +182,29 @@ jobs:
 
             echo "Creating user with UID: ${NEW_UID}"
 
-            sudo dscl . -create /Users/${ADMIN_USER}
-            sudo dscl . -create /Users/${ADMIN_USER} UserShell /bin/zsh
-            sudo dscl . -create /Users/${ADMIN_USER} RealName "Your Name"
-            sudo dscl . -create /Users/${ADMIN_USER} UniqueID ${NEW_UID}
-            sudo dscl . -create /Users/${ADMIN_USER} PrimaryGroupID 20
-            sudo dscl . -create /Users/${ADMIN_USER} NFSHomeDirectory /Users/${ADMIN_USER}
+            sudo dscl . -create "/Users/${ADMIN_USER}"
+            sudo dscl . -create "/Users/${ADMIN_USER}" UserShell /bin/zsh
+            sudo dscl . -create "/Users/${ADMIN_USER}" RealName "Your Name"
+            sudo dscl . -create "/Users/${ADMIN_USER}" UniqueID "${NEW_UID}"
+            sudo dscl . -create "/Users/${ADMIN_USER}" PrimaryGroupID 20
+            sudo dscl . -create "/Users/${ADMIN_USER}" NFSHomeDirectory "/Users/${ADMIN_USER}"
 
-            sudo dscl . -passwd /Users/${ADMIN_USER} "${MAC_PASSWORD}"
+            sudo dscl . -passwd "/Users/${ADMIN_USER}" "${MAC_PASSWORD}"
+            sudo dseditgroup -o edit -a "${ADMIN_USER}" -t user admin
 
-            sudo dseditgroup -o edit -a ${ADMIN_USER} -t user admin
-
-            sudo createhomedir -c -u ${ADMIN_USER} 2>/dev/null || sudo mkdir -p /Users/${ADMIN_USER}
-            sudo chown -R ${ADMIN_USER}:staff /Users/${ADMIN_USER} 2>/dev/null || true
+            sudo createhomedir -c -u "${ADMIN_USER}" 2>/dev/null || sudo mkdir -p "/Users/${ADMIN_USER}"
+            sudo chown -R "${ADMIN_USER}:staff" "/Users/${ADMIN_USER}" 2>/dev/null || true
           fi
 
           if id "${ADMIN_USER}" &>/dev/null; then
-            echo "✅ User ${ADMIN_USER} created successfully"
+            echo "✅ User ${ADMIN_USER} exists."
             if dseditgroup -o checkmember -m "${ADMIN_USER}" admin 2>/dev/null; then
-              echo "✅ User ${ADMIN_USER} is an admin"
+              echo "✅ User ${ADMIN_USER} is an admin."
             fi
           else
-            echo "❌ Failed to create user"
+            echo "::warning::Failed to verify admin user creation."
           fi
 
-          echo ""
-          echo "Use these credentials for System Settings:"
           echo "User: ${ADMIN_USER}"
           echo "Password: (in artifact file)"
 
@@ -213,7 +226,7 @@ jobs:
           RUSTDESK_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
 
           echo "::add-mask::${RUSTDESK_PASSWORD}"
-          echo "RUSTDESK_PASSWORD=${RUSTDESK_PASSWORD}" >> $GITHUB_ENV
+          echo "RUSTDESK_PASSWORD=${RUSTDESK_PASSWORD}" >> "$GITHUB_ENV"
 
           export RUSTDESK_PASSWORD
           ./scripts/setup-rustdesk.sh
@@ -236,19 +249,17 @@ jobs:
             fi
 
             if [ -n "$RUSTDESK_ID" ]; then
-              echo "RUSTDESK_ID=${RUSTDESK_ID}" >> $GITHUB_ENV
+              echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_ENV"
               echo "✅ RustDesk ID: ${RUSTDESK_ID}"
             else
               echo "⚠️ Could not retrieve RustDesk ID automatically"
-              echo "RUSTDESK_ID=Check_Logs" >> $GITHUB_ENV
+              echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
             fi
           else
             echo "⚠️ RustDesk executable not found"
-            echo "RUSTDESK_ID=Check_Logs" >> $GITHUB_ENV
+            echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
           fi
 
-      # Added: launch portal authentication in a separate Terminal window.
-      # The GitHub Actions step does not wait for the interactive login to finish.
       - name: 🔐 Start Hermes Portal Authentication
         run: |
           set -e
@@ -281,9 +292,9 @@ jobs:
           HERMES PORTAL AUTHENTICATION
 
           1. Connect to this Mac using RustDesk.
-          2. Find the Terminal window for Hermes Portal Authentication.
+          2. Find the Terminal window named for Hermes Portal authentication.
           3. Complete the Nous Portal login in Google Chrome.
-          4. Return to Terminal and finish any setup/model selection prompts.
+          4. Return to Terminal and finish any setup or model-selection prompts.
           5. Check Hermes-Auth.log on the Desktop if setup fails.
 
           Keep authentication tokens private. Do not share the log publicly.
@@ -301,12 +312,11 @@ jobs:
           echo "Hermes Portal authentication started: $(date)" >> "$LOG"
           echo "========================================" >> "$LOG"
 
-          # Open Chrome on the Mac before starting the official interactive setup.
           open -a "Google Chrome" 2>&1 | tee -a "$LOG" || true
 
           echo ""
-          echo "Starting the official Hermes Portal setup..."
-          echo "Complete the browser login, then return to this Terminal window."
+          echo "Starting official Hermes Portal setup..."
+          echo "Complete the login in Chrome, then return to this Terminal."
           echo ""
 
           hermes setup --portal 2>&1 | tee -a "$LOG"
@@ -328,9 +338,6 @@ jobs:
 
           chmod +x "$AUTH_SCRIPT"
 
-          echo "Preparing to open the interactive authentication window..."
-
-          # Launch the command in Terminal without blocking this Actions step.
           osascript <<'APPLESCRIPT'
           tell application "Terminal"
             activate
@@ -338,10 +345,9 @@ jobs:
           end tell
           APPLESCRIPT
 
-          echo "Authentication was launched in a separate Terminal window."
+          echo "Authentication launched in a separate Terminal window."
           echo "Instructions: $INSTRUCTIONS"
           echo "Log file: $AUTH_LOG"
-          echo "Connect with RustDesk and complete the login on the Mac."
 
       - name: 💾 Save Credentials (Private File)
         run: |
@@ -376,7 +382,7 @@ jobs:
           Hermes Agent (Tailscale):
           ────────────────────────────────────────────────────────────
 
-          URL:      ${{ env.HERMES_URL || '(see logs — Hermes Agent + Hermex)' }}
+          URL:      ${{ env.HERMES_URL || '(server not started)' }}
           Tailnet:  ${{ env.TAILSCALE_IP || '(same tailnet as this runner)' }}
 
           ────────────────────────────────────────────────────────────
@@ -434,7 +440,7 @@ jobs:
           echo "RustDesk ID: ${{ env.RUSTDESK_ID }}"
           echo "RustDesk Password: (in artifact)"
           echo ""
-          echo "Hermes URL: ${{ env.HERMES_URL || '(see logs)' }}"
+          echo "Hermes URL: ${{ env.HERMES_URL || '(server not started)' }}"
           echo "Hermex:     /Users/runner/Desktop/hermex"
           echo ""
           echo "Download artifact: credentials-${{ github.actor }}-${{ github.run_id }}"
