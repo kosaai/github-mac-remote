@@ -46,7 +46,8 @@ on:
           - 'true'
 
 env:
-  SESSION_DURATION: 5
+  # Honour the workflow_dispatch 'duration' input (1-6 hours), fall back to 5.
+  SESSION_DURATION: ${{ github.event.inputs.duration || 5 }}
 
 jobs:
   mac-rustdesk-session:
@@ -81,13 +82,25 @@ jobs:
       - name: 🤖 Hermes Agent + Hermex
         run: |
           chmod +x scripts/setup-hermes.sh
+          export HERMES_PORT="${HERMES_PORT:-9119}"
           ./scripts/setup-hermes.sh
           if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
-            HERMES_URL=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)
+            TS_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
           else
-            HERMES_URL=$(tailscale serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)
+            TS_CLI="tailscale"
           fi
+          HERMES_URL=$("$TS_CLI" serve status 2>/dev/null \
+            | grep -oE 'https://[^[:space:]]+' \
+            | grep -E ":${HERMES_PORT}([[:space:]]|$)" \
+            | head -1)
+          TAILSCALE_IP=$("$TS_CLI" ip -4 2>/dev/null | head -1)
           echo "HERMES_URL=${HERMES_URL}" >> $GITHUB_ENV
+          echo "TAILSCALE_IP=${TAILSCALE_IP}" >> $GITHUB_ENV
+          if [ -z "${HERMES_URL}" ]; then
+            echo "::warning::Could not read the Tailscale serve URL for port ${HERMES_PORT}"
+          fi
+          echo "Hermes:   ${HERMES_URL:-'(see logs)'}"
+          echo "Tailnet:  ${TAILSCALE_IP:-'(unavailable)'}"
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
@@ -244,8 +257,8 @@ jobs:
           Hermes Agent (Tailscale):
           ────────────────────────────────────────────────────────────
 
-          URL:      ${{ env.HERMES_URL || '(see logs — Expose Hermes on Tailscale)' }}
-          Tailnet:  ${{ steps.rustdesk.outputs.ts_ip || '(same tailnet as this runner)' }}
+          URL:      ${{ env.HERMES_URL || '(see logs — Hermes Agent + Hermex)' }}
+          Tailnet:  ${{ env.TAILSCALE_IP || '(same tailnet as this runner)' }}
 
           ────────────────────────────────────────────────────────────
           macOS Admin Credentials:
