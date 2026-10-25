@@ -78,37 +78,16 @@ jobs:
           dscacheutil -flushcache 2>/dev/null || true
           killall -HUP mDNSResponder 2>/dev/null || true
 
-      - name: 🤖 Install Hermes Agent
+      - name: 🤖 Hermes Agent + Hermex
         run: |
-          echo "📦 Installing Hermes Agent..."
-          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash || {
-            echo "⚠️ Hermes install failed (network or Cloudflare block)"
-            exit 0
-          }
-          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          hermes --version 2>/dev/null && echo "HERMES_VERSION=$(hermes --version 2>/dev/null)" >> $GITHUB_ENV || \
-            echo "⚠️ hermes binary not on PATH"
-
-      - name: 🔌 Expose Hermes on Tailscale
-        run: |
-          TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-          if [ ! -x "$TS" ]; then TS="tailscale"; fi
-          echo "🔗 Serving Hermes gateway on the tailnet (port 9119)..."
-          "$TS" serve --bg 9119 2>&1 | head -5 || true
-          sleep 3
-          "$TS" serve status 2>&1 | head -10 || true
-          echo ""
-          echo "HERMES_URL=$("$TS" serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)" >> $GITHUB_ENV
-
-      - name: 📱 Install Hermex on Desktop
-        run: |
-          DEST="/Users/runner/Desktop/hermex"
-          if [ -d "$DEST/.git" ]; then
-            echo "✅ Hermex already on the Desktop"
+          chmod +x scripts/setup-hermes.sh
+          ./scripts/setup-hermes.sh
+          if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+            HERMES_URL=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)
           else
-            git clone --depth 1 https://github.com/kosaai/hermex.git "$DEST" 2>&1 | tail -3
+            HERMES_URL=$(tailscale serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)
           fi
-          ls -d "$DEST" && echo "✅ Hermex at $DEST"
+          echo "HERMES_URL=${HERMES_URL}" >> $GITHUB_ENV
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
