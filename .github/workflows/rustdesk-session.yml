@@ -58,7 +58,7 @@ jobs:
       - name: ❌ Validate runner selection
         if: (github.event.inputs.macos_version == '27' && github.event.inputs.runner_size == 'large') || (github.event.inputs.runner_size == 'intel' && github.event.inputs.macos_version != '26')
         run: |
-          echo "::error::Unsupported runner selection. macOS 27 supports standard (xcode-27) or xlarge (xcode-27-xlarge) in this workflow. Intel is only configured for macOS 26."
+          echo "::error::Unsupported runner selection. macOS 27 supports standard (xcode-27) or xlarge (xcode-27-xlarge). Intel is only configured for macOS 26."
           exit 1
 
       - name: 📥 Checkout repository
@@ -92,11 +92,7 @@ jobs:
             brew install --cask google-chrome
           fi
 
-          if [ ! -d "/Applications/Google Chrome.app" ]; then
-            echo "::error::Google Chrome installation failed."
-            exit 1
-          fi
-
+          test -d "/Applications/Google Chrome.app"
           echo "Google Chrome is ready."
 
       - name: 🤖 Hermes Agent + Hermex
@@ -104,7 +100,7 @@ jobs:
           set -e
 
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          export HERMES_PORT="${HERMES_PORT:-9119}"
+          mkdir -p "$HOME/Desktop"
 
           if ! command -v hermes >/dev/null 2>&1; then
             echo "Installing Hermes Agent..."
@@ -117,10 +113,7 @@ jobs:
             exit 1
           fi
 
-          echo "Hermes CLI is installed."
-
           HERMEX_DIR="$HOME/Desktop/hermex"
-          mkdir -p "$HOME/Desktop"
 
           if [ ! -d "$HERMEX_DIR" ]; then
             git clone https://github.com/kosaai/hermex.git "$HERMEX_DIR"
@@ -138,8 +131,8 @@ jobs:
           echo "TAILSCALE_IP=${TAILSCALE_IP}" >> "$GITHUB_ENV"
           echo "HERMES_URL=" >> "$GITHUB_ENV"
 
-          echo "Hermes is installed; Portal authentication will start after RustDesk setup."
-          echo "Tailnet: ${TAILSCALE_IP:-'(unavailable)'}"
+          echo "Hermes installed. Portal authentication will be launched after RustDesk setup."
+          echo "Tailnet IP: ${TAILSCALE_IP:-unavailable}"
 
       - name: 📦 Restore IP History Cache
         uses: actions/cache@v4
@@ -162,25 +155,22 @@ jobs:
 
       - name: 🔐 Create Admin User for GUI Authentication
         run: |
+          set -e
+
           ADMIN_USER="yourname"
           echo "MAC_USER=${ADMIN_USER}" >> "$GITHUB_ENV"
 
-          MAC_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
-
+          MAC_PASSWORD=$(openssl rand -hex 12)
           echo "::add-mask::${MAC_PASSWORD}"
           echo "MAC_PASSWORD=${MAC_PASSWORD}" >> "$GITHUB_ENV"
 
-          echo "👤 Creating admin user: ${ADMIN_USER}"
+          echo "Creating or updating macOS account: ${ADMIN_USER}"
 
-          if id "${ADMIN_USER}" &>/dev/null; then
-            echo "User ${ADMIN_USER} already exists, setting password..."
-            sudo dscl . -passwd "/Users/${ADMIN_USER}" "" "${MAC_PASSWORD}" 2>/dev/null || \
-            sudo sysadminctl -resetPasswordFor "${ADMIN_USER}" -newPassword "${MAC_PASSWORD}" 2>/dev/null || true
+          if id "${ADMIN_USER}" >/dev/null 2>&1; then
+            sudo dscl . -passwd "/Users/${ADMIN_USER}" "${MAC_PASSWORD}"
           else
             LAST_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
             NEW_UID=$((LAST_UID + 1))
-
-            echo "Creating user with UID: ${NEW_UID}"
 
             sudo dscl . -create "/Users/${ADMIN_USER}"
             sudo dscl . -create "/Users/${ADMIN_USER}" UserShell /bin/zsh
@@ -188,25 +178,19 @@ jobs:
             sudo dscl . -create "/Users/${ADMIN_USER}" UniqueID "${NEW_UID}"
             sudo dscl . -create "/Users/${ADMIN_USER}" PrimaryGroupID 20
             sudo dscl . -create "/Users/${ADMIN_USER}" NFSHomeDirectory "/Users/${ADMIN_USER}"
-
             sudo dscl . -passwd "/Users/${ADMIN_USER}" "${MAC_PASSWORD}"
             sudo dseditgroup -o edit -a "${ADMIN_USER}" -t user admin
-
             sudo createhomedir -c -u "${ADMIN_USER}" 2>/dev/null || sudo mkdir -p "/Users/${ADMIN_USER}"
             sudo chown -R "${ADMIN_USER}:staff" "/Users/${ADMIN_USER}" 2>/dev/null || true
           fi
 
-          if id "${ADMIN_USER}" &>/dev/null; then
-            echo "✅ User ${ADMIN_USER} exists."
-            if dseditgroup -o checkmember -m "${ADMIN_USER}" admin 2>/dev/null; then
-              echo "✅ User ${ADMIN_USER} is an admin."
-            fi
-          else
-            echo "::warning::Failed to verify admin user creation."
+          if ! id "${ADMIN_USER}" >/dev/null 2>&1; then
+            echo "::error::Could not verify the macOS user."
+            exit 1
           fi
 
-          echo "User: ${ADMIN_USER}"
-          echo "Password: (in artifact file)"
+          echo "MAC_USER=${ADMIN_USER}"
+          echo "MAC_PASSWORD is generated and masked; retrieve it from the credentials artifact."
 
       - name: 📊 System Information
         run: |
@@ -221,16 +205,15 @@ jobs:
       - name: 🦀 Setup RustDesk
         id: rustdesk
         run: |
+          set -e
           chmod +x scripts/setup-rustdesk.sh
 
-          RUSTDESK_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
-
+          RUSTDESK_PASSWORD=$(openssl rand -hex 12)
           echo "::add-mask::${RUSTDESK_PASSWORD}"
           echo "RUSTDESK_PASSWORD=${RUSTDESK_PASSWORD}" >> "$GITHUB_ENV"
 
           export RUSTDESK_PASSWORD
           ./scripts/setup-rustdesk.sh
-
           sleep 10
 
       - name: 🔑 Get RustDesk ID
@@ -239,219 +222,204 @@ jobs:
           sleep 5
 
           RUSTDESK_CLI="/Applications/RustDesk.app/Contents/MacOS/rustdesk"
+          RUSTDESK_ID=""
 
           if [ -f "$RUSTDESK_CLI" ]; then
-            RUSTDESK_ID=$("$RUSTDESK_CLI" --get-id 2>/dev/null || echo "")
-
-            if [ -z "$RUSTDESK_ID" ]; then
-              CONFIG_DIR="$HOME/Library/Application Support/RustDesk"
-              RUSTDESK_ID=$(cat "${CONFIG_DIR}/id" 2>/dev/null || echo "")
-            fi
-
-            if [ -n "$RUSTDESK_ID" ]; then
-              echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_ENV"
-              echo "✅ RustDesk ID: ${RUSTDESK_ID}"
-            else
-              echo "⚠️ Could not retrieve RustDesk ID automatically"
-              echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
-            fi
-          else
-            echo "⚠️ RustDesk executable not found"
-            echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
+            RUSTDESK_ID=$("$RUSTDESK_CLI" --get-id 2>/dev/null || true)
           fi
 
-      - name: 🔐 Start Hermes Portal Authentication
-        run: |
-          set -e
+          if [ -z "$RUSTDESK_ID" ]; then
+            CONFIG_DIR="$HOME/Library/Application Support/RustDesk"
+            RUSTDESK_ID=$(cat "${CONFIG_DIR}/id" 2>/dev/null || true)
+          fi
 
+          if [ -n "$RUSTDESK_ID" ]; then
+            echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_ENV"
+            echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_OUTPUT"
+            echo "RustDesk ID retrieved."
+          else
+            echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
+            echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not retrieve RustDesk ID automatically."
+          fi
+
+      # Authentication launch must not prevent credentials from being saved.
+      - name: 🔐 Start Hermes Portal Authentication
+        continue-on-error: true
+        run: |
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
 
           DESKTOP="$HOME/Desktop"
           AUTH_SCRIPT="$DESKTOP/start-hermes-auth.sh"
           AUTH_LOG="$DESKTOP/Hermes-Auth.log"
           INSTRUCTIONS="$DESKTOP/Hermes-Authentication-Instructions.txt"
+          LAUNCH_LOG="$RUNNER_TEMP/hermes-terminal-launch.log"
 
           mkdir -p "$DESKTOP"
 
           if ! command -v hermes >/dev/null 2>&1; then
-            echo "::error::Hermes CLI is not installed or not on PATH."
-            exit 1
+            echo "::warning::Hermes CLI not found; skipping interactive authentication."
+            exit 0
           fi
 
           if [ ! -d "/Applications/Google Chrome.app" ]; then
-            echo "::error::Google Chrome is not installed."
-            exit 1
+            echo "::warning::Google Chrome not found; skipping interactive authentication."
+            exit 0
           fi
 
           if [ ! -d "/Applications/RustDesk.app" ]; then
-            echo "::error::RustDesk.app was not found."
-            exit 1
+            echo "::warning::RustDesk.app not found; skipping interactive authentication."
+            exit 0
           fi
 
           cat > "$INSTRUCTIONS" <<'EOF'
           HERMES PORTAL AUTHENTICATION
 
           1. Connect to this Mac using RustDesk.
-          2. Find the Terminal window named for Hermes Portal authentication.
+          2. Look for the Terminal window for Hermes Portal authentication.
           3. Complete the Nous Portal login in Google Chrome.
-          4. Return to Terminal and finish any setup or model-selection prompts.
+          4. Return to Terminal and finish any setup/model-selection prompts.
           5. Check Hermes-Auth.log on the Desktop if setup fails.
 
-          Keep authentication tokens private. Do not share the log publicly.
+          Keep authentication tokens private.
           EOF
 
           cat > "$AUTH_SCRIPT" <<'AUTH_EOF'
           #!/bin/bash
-
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
           export BROWSER='open -a "Google Chrome" %s'
 
           LOG="$HOME/Desktop/Hermes-Auth.log"
+          echo "Hermes Portal setup started: $(date)" >> "$LOG"
 
-          echo "========================================" >> "$LOG"
-          echo "Hermes Portal authentication started: $(date)" >> "$LOG"
-          echo "========================================" >> "$LOG"
-
-          open -a "Google Chrome" 2>&1 | tee -a "$LOG" || true
-
-          echo ""
-          echo "Starting official Hermes Portal setup..."
-          echo "Complete the login in Chrome, then return to this Terminal."
-          echo ""
+          open -a "Google Chrome" >> "$LOG" 2>&1 || true
 
           hermes setup --portal 2>&1 | tee -a "$LOG"
           RESULT=${PIPESTATUS[0]}
 
           if [ "$RESULT" -eq 0 ]; then
-            echo ""
-            echo "Hermes Portal setup command completed." | tee -a "$LOG"
             hermes portal info 2>&1 | tee -a "$LOG" || true
           else
-            echo ""
             echo "Hermes setup exited with code $RESULT." | tee -a "$LOG"
           fi
 
           echo ""
-          echo "Authentication terminal remains open."
           read -r -p "Press Enter to close this Terminal session: "
           AUTH_EOF
 
           chmod +x "$AUTH_SCRIPT"
 
-          osascript <<'APPLESCRIPT'
+          # Ask Terminal to launch the script asynchronously.
+          # If the GUI session is unavailable, the workflow continues.
+          cat > "$RUNNER_TEMP/launch-hermes-terminal.applescript" <<'APPLESCRIPT'
           tell application "Terminal"
             activate
             do script "bash \"$HOME/Desktop/start-hermes-auth.sh\""
           end tell
           APPLESCRIPT
 
-          echo "Authentication launched in a separate Terminal window."
-          echo "Instructions: $INSTRUCTIONS"
-          echo "Log file: $AUTH_LOG"
+          nohup /usr/bin/osascript "$RUNNER_TEMP/launch-hermes-terminal.applescript" \
+            > "$LAUNCH_LOG" 2>&1 < /dev/null &
+
+          echo "Terminal launch request submitted in background."
+          echo "Authentication instructions: $INSTRUCTIONS"
+          echo "Authentication log: $AUTH_LOG"
+          echo "AppleScript launch log: $LAUNCH_LOG"
 
       - name: 💾 Save Credentials (Private File)
+        if: always()
+        env:
+          MAC_USER: ${{ env.MAC_USER }}
+          MAC_PASSWORD: ${{ env.MAC_PASSWORD }}
+          RUSTDESK_ID: ${{ env.RUSTDESK_ID }}
+          RUSTDESK_PASSWORD: ${{ env.RUSTDESK_PASSWORD }}
+          CURRENT_IP: ${{ env.CURRENT_IP }}
+          IP_CITY: ${{ env.IP_CITY }}
+          IP_COUNTRY: ${{ env.IP_COUNTRY }}
+          IP_ORG: ${{ env.IP_ORG }}
+          WARP_ENABLED: ${{ env.WARP_ENABLED }}
+          HERMES_URL: ${{ env.HERMES_URL }}
+          TAILSCALE_IP: ${{ env.TAILSCALE_IP }}
         run: |
           mkdir -p credentials
 
-          cat > credentials/connection-info.txt << EOF
-          ════════════════════════════════════════════════════════════
-                    GITHUB MAC REMOTE - CREDENTIALS
-          ════════════════════════════════════════════════════════════
+          cat > credentials/connection-info.txt <<EOF
+          ============================================================
+                    GITHUB MAC REMOTE - CONNECTION INFO
+          ============================================================
 
           Started by: ${{ github.actor }}
           Date/Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           Run ID: ${{ github.run_id }}
 
-          ────────────────────────────────────────────────────────────
-          Network Information:
-          ────────────────────────────────────────────────────────────
+          NETWORK
+          Public IP: ${CURRENT_IP:-Unavailable}
+          Location: ${IP_CITY:-Unknown}, ${IP_COUNTRY:-Unknown}
+          Provider: ${IP_ORG:-Unknown}
+          WARP VPN: ${WARP_ENABLED:-false}
 
-          Public IP:  ${{ env.CURRENT_IP }}
-          Location:   ${{ env.IP_CITY }}, ${{ env.IP_COUNTRY }}
-          Provider:   ${{ env.IP_ORG }}
-          WARP VPN:   ${{ env.WARP_ENABLED || 'false' }}
+          RUSTDESK
+          ID: ${RUSTDESK_ID:-Unavailable}
+          Password: ${RUSTDESK_PASSWORD:-Unavailable}
 
-          ────────────────────────────────────────────────────────────
-          RustDesk Credentials:
-          ────────────────────────────────────────────────────────────
+          MACOS ADMIN
+          User: ${MAC_USER:-Unavailable}
+          Password: ${MAC_PASSWORD:-Unavailable}
 
-          ID:       ${{ env.RUSTDESK_ID }}
-          Password: ${{ env.RUSTDESK_PASSWORD }}
+          HERMES
+          URL: ${HERMES_URL:-Not started by this workflow}
+          Tailnet IP: ${TAILSCALE_IP:-Unavailable}
 
-          ────────────────────────────────────────────────────────────
-          Hermes Agent (Tailscale):
-          ────────────────────────────────────────────────────────────
-
-          URL:      ${{ env.HERMES_URL || '(server not started)' }}
-          Tailnet:  ${{ env.TAILSCALE_IP || '(same tailnet as this runner)' }}
-
-          ────────────────────────────────────────────────────────────
-          macOS Admin Credentials:
-          ────────────────────────────────────────────────────────────
-
-          User:     ${{ env.MAC_USER }}
-          Password: ${{ env.MAC_PASSWORD }}
-
-          Use these credentials for System Settings and admin authentication.
-
-          ────────────────────────────────────────────────────────────
-          How to Connect:
-          ────────────────────────────────────────────────────────────
-
-          1. Download RustDesk from: https://rustdesk.com/download
-          2. Install and open RustDesk on your computer
-          3. Enter the RustDesk ID shown above
-          4. Enter the RustDesk password shown above
-          5. Click Connect!
+          HOW TO CONNECT
+          1. Open RustDesk on your device.
+          2. Enter the RustDesk ID above.
+          3. Enter the RustDesk password above.
 
           WARNING: This file contains sensitive credentials.
-          Do not share with others.
-          ════════════════════════════════════════════════════════════
+          Do not share it publicly.
+          ============================================================
           EOF
 
+          chmod 600 credentials/connection-info.txt
+
+          # Display only non-secret connection identifiers in the log.
+          echo "Credentials file created."
+          echo "MAC_USER=${MAC_USER:-Unavailable}"
+          echo "RUSTDESK_ID=${RUSTDESK_ID:-Unavailable}"
+          echo "Passwords are hidden from logs and stored in the artifact."
+
       - name: 📦 Upload Credentials Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: credentials-${{ github.actor }}-${{ github.run_id }}
-          path: credentials/
+          path: credentials/connection-info.txt
+          if-no-files-found: warn
           retention-days: 1
 
       - name: 📋 Connection Instructions
+        if: always()
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════════╗"
-          echo "║              🦀 GITHUB MAC REMOTE - READY                        ║"
-          echo "╚══════════════════════════════════════════════════════════════════╝"
-          echo ""
+          echo "============================================================"
+          echo "             GITHUB MAC REMOTE - CONNECTION"
+          echo "============================================================"
           echo "Session started by: ${{ github.actor }}"
+          echo "macOS User: ${{ env.MAC_USER || 'Unavailable' }}"
+          echo "RustDesk ID: ${{ env.RUSTDESK_ID || 'Unavailable' }}"
+          echo "Hermes URL: ${HERMES_URL:-Not started}"
+          echo "Hermex directory: $HOME/Desktop/hermex"
           echo ""
-          echo "Public IP: ${{ env.CURRENT_IP }}"
-          echo "Location: ${{ env.IP_CITY }}, ${{ env.IP_COUNTRY }}"
-          if [ "${{ env.WARP_ENABLED }}" = "true" ]; then
-            echo "VPN: Cloudflare WARP (Unique IP Enabled)"
-          fi
-          if [ "${{ env.IP_IS_DUPLICATE }}" = "true" ]; then
-            echo "WARNING: This IP was previously used!"
-          fi
+          echo "Download the credentials artifact:"
+          echo "credentials-${{ github.actor }}-${{ github.run_id }}"
           echo ""
-          echo "macOS User: ${{ env.MAC_USER }}"
-          echo "macOS Password: (in artifact)"
-          echo ""
-          echo "RustDesk ID: ${{ env.RUSTDESK_ID }}"
-          echo "RustDesk Password: (in artifact)"
-          echo ""
-          echo "Hermes URL: ${{ env.HERMES_URL || '(server not started)' }}"
-          echo "Hermex:     /Users/runner/Desktop/hermex"
-          echo ""
-          echo "Download artifact: credentials-${{ github.actor }}-${{ github.run_id }}"
-          echo ""
-          echo "Session active for ${{ env.SESSION_DURATION }} hour(s)"
-          echo "Passwords are NOT displayed in logs."
+          echo "The artifact contains the RustDesk and macOS passwords."
+          echo "Passwords are not printed in the workflow log."
+          echo "Session duration requested: ${{ env.SESSION_DURATION }} hour(s)."
 
       - name: ⏱️ Keep Session Alive
         run: |
           chmod +x scripts/keep-alive.sh
-
           export DURATION_HOURS="${{ env.SESSION_DURATION }}"
           ./scripts/keep-alive.sh
 
