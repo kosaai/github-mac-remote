@@ -1,4 +1,3 @@
-
 name: Mac qusai
 
 on:
@@ -50,27 +49,27 @@ env:
 
 jobs:
   mac-rustdesk-session:
-    name: 🦀 Mac RustDesk Session (macOS ${{ github.event.inputs.macos_version }})
+    name: Mac RustDesk Session (macOS ${{ github.event.inputs.macos_version }})
     runs-on: ${{ github.event.inputs.macos_version == '27' && github.event.inputs.runner_size == 'standard' && 'xcode-27' || github.event.inputs.macos_version == '27' && github.event.inputs.runner_size == 'xlarge' && 'xcode-27-xlarge' || github.event.inputs.macos_version == '27' && 'unsupported-macos-27-runner-size' || github.event.inputs.runner_size == 'xlarge' && format('macos-{0}-xlarge', github.event.inputs.macos_version) || github.event.inputs.runner_size == 'large' && format('macos-{0}-large', github.event.inputs.macos_version) || github.event.inputs.runner_size == 'intel' && github.event.inputs.macos_version == '26' && 'macos-26-intel' || github.event.inputs.runner_size == 'intel' && 'unsupported-intel-runner-version' || format('macos-{0}', github.event.inputs.macos_version) }}
     timeout-minutes: 370
 
     steps:
-      - name: ❌ Validate runner selection
+      - name: Validate runner selection
         if: (github.event.inputs.macos_version == '27' && github.event.inputs.runner_size == 'large') || (github.event.inputs.runner_size == 'intel' && github.event.inputs.macos_version != '26')
         run: |
-          echo "::error::Unsupported runner selection. macOS 27 supports standard (xcode-27) or xlarge (xcode-27-xlarge). Intel is only configured for macOS 26."
+          echo "::error::Unsupported runner selection. macOS 27 supports standard or xlarge. Intel is only configured for macOS 26."
           exit 1
 
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔗 Connect to Tailscale
+      - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           args: --accept-dns=false
 
-      - name: 🔧 Restore DNS after Tailscale
+      - name: Restore DNS after Tailscale
         run: |
           for svc in "Wi-Fi" "Ethernet" "USB 10/100/1000 LAN" "Thunderbolt Bridge"; do
             networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 2>/dev/null || true
@@ -78,63 +77,49 @@ jobs:
           dscacheutil -flushcache 2>/dev/null || true
           killall -HUP mDNSResponder 2>/dev/null || true
 
-      - name: 🌐 Install Google Chrome
+      - name: Install Google Chrome
         run: |
           set -e
-
           if [ -d "/Applications/Google Chrome.app" ]; then
             echo "Google Chrome is already installed."
           else
-            if ! command -v brew >/dev/null 2>&1; then
-              echo "::error::Homebrew is not available; cannot install Google Chrome."
+            command -v brew >/dev/null 2>&1 || {
+              echo "::error::Homebrew is not available."
               exit 1
-            fi
+            }
             brew install --cask google-chrome
           fi
-
           test -d "/Applications/Google Chrome.app"
-          echo "Google Chrome is ready."
 
-      - name: 🤖 Hermes Agent + Hermex
+      - name: Install Hermes Agent and Hermex
         run: |
           set -e
-
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
           mkdir -p "$HOME/Desktop"
 
           if ! command -v hermes >/dev/null 2>&1; then
-            echo "Installing Hermes Agent..."
             curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
             export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
           fi
 
-          if ! command -v hermes >/dev/null 2>&1; then
-            echo "::error::Hermes installation failed or the CLI is not on PATH."
+          command -v hermes >/dev/null 2>&1 || {
+            echo "::error::Hermes installation failed."
             exit 1
-          fi
+          }
 
           HERMEX_DIR="$HOME/Desktop/hermex"
-
           if [ ! -d "$HERMEX_DIR" ]; then
             git clone https://github.com/kosaai/hermex.git "$HERMEX_DIR"
-          else
-            echo "Hermex directory already exists."
           fi
 
-          if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
-            TS_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-          else
-            TS_CLI="tailscale"
-          fi
-
-          TAILSCALE_IP=$("$TS_CLI" ip -4 2>/dev/null | head -1 || true)
-          echo "TAILSCALE_IP=${TAILSCALE_IP}" >> "$GITHUB_ENV"
+          TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
           echo "HERMES_URL=" >> "$GITHUB_ENV"
 
-          echo "Hermes installed. Portal authentication will be launched after RustDesk setup."
-          echo "Tailnet IP: ${TAILSCALE_IP:-unavailable}"
+          echo "Hermes and Hermex are ready."
+          echo "Tailscale IP: ${TS_IP:-unavailable}"
 
-      - name: 📦 Restore IP History Cache
+      - name: Restore IP History Cache
         uses: actions/cache@v4
         with:
           path: .ip-history.json
@@ -142,85 +127,80 @@ jobs:
           restore-keys: |
             ip-history-
 
-      - name: 🌐 Detect and Track IP
+      - name: Detect and Track IP
         run: |
           chmod +x scripts/ip-manager.sh
           ./scripts/ip-manager.sh
 
-      - name: 🔒 Setup Unique IP (Cloudflare WARP)
+      - name: Setup Unique IP (Cloudflare WARP)
         if: github.event.inputs.unique_ip == 'true'
         run: |
           chmod +x scripts/setup-warp.sh
           ./scripts/setup-warp.sh
 
-      - name: 🔐 Create Admin User for GUI Authentication
+      - name: Create Admin User for GUI Authentication
         run: |
           set -e
-
           ADMIN_USER="yourname"
-          echo "MAC_USER=${ADMIN_USER}" >> "$GITHUB_ENV"
+          echo "MAC_USER=$ADMIN_USER" >> "$GITHUB_ENV"
 
           MAC_PASSWORD=$(openssl rand -hex 12)
-          echo "::add-mask::${MAC_PASSWORD}"
-          echo "MAC_PASSWORD=${MAC_PASSWORD}" >> "$GITHUB_ENV"
+          echo "::add-mask::$MAC_PASSWORD"
+          echo "MAC_PASSWORD=$MAC_PASSWORD" >> "$GITHUB_ENV"
 
-          echo "Creating or updating macOS account: ${ADMIN_USER}"
-
-          if id "${ADMIN_USER}" >/dev/null 2>&1; then
-            sudo dscl . -passwd "/Users/${ADMIN_USER}" "${MAC_PASSWORD}"
+          if id "$ADMIN_USER" >/dev/null 2>&1; then
+            sudo dscl . -passwd "/Users/$ADMIN_USER" "$MAC_PASSWORD"
           else
             LAST_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
             NEW_UID=$((LAST_UID + 1))
 
-            sudo dscl . -create "/Users/${ADMIN_USER}"
-            sudo dscl . -create "/Users/${ADMIN_USER}" UserShell /bin/zsh
-            sudo dscl . -create "/Users/${ADMIN_USER}" RealName "Your Name"
-            sudo dscl . -create "/Users/${ADMIN_USER}" UniqueID "${NEW_UID}"
-            sudo dscl . -create "/Users/${ADMIN_USER}" PrimaryGroupID 20
-            sudo dscl . -create "/Users/${ADMIN_USER}" NFSHomeDirectory "/Users/${ADMIN_USER}"
-            sudo dscl . -passwd "/Users/${ADMIN_USER}" "${MAC_PASSWORD}"
-            sudo dseditgroup -o edit -a "${ADMIN_USER}" -t user admin
-            sudo createhomedir -c -u "${ADMIN_USER}" 2>/dev/null || sudo mkdir -p "/Users/${ADMIN_USER}"
-            sudo chown -R "${ADMIN_USER}:staff" "/Users/${ADMIN_USER}" 2>/dev/null || true
+            sudo dscl . -create "/Users/$ADMIN_USER"
+            sudo dscl . -create "/Users/$ADMIN_USER" UserShell /bin/zsh
+            sudo dscl . -create "/Users/$ADMIN_USER" RealName "Your Name"
+            sudo dscl . -create "/Users/$ADMIN_USER" UniqueID "$NEW_UID"
+            sudo dscl . -create "/Users/$ADMIN_USER" PrimaryGroupID 20
+            sudo dscl . -create "/Users/$ADMIN_USER" NFSHomeDirectory "/Users/$ADMIN_USER"
+            sudo dscl . -passwd "/Users/$ADMIN_USER" "$MAC_PASSWORD"
+            sudo dseditgroup -o edit -a "$ADMIN_USER" -t user admin
+            sudo createhomedir -c -u "$ADMIN_USER" 2>/dev/null || sudo mkdir -p "/Users/$ADMIN_USER"
+            sudo chown -R "$ADMIN_USER:staff" "/Users/$ADMIN_USER" 2>/dev/null || true
           fi
 
-          if ! id "${ADMIN_USER}" >/dev/null 2>&1; then
-            echo "::error::Could not verify the macOS user."
+          id "$ADMIN_USER" >/dev/null 2>&1 || {
+            echo "::error::Could not verify macOS user."
             exit 1
-          fi
+          }
 
-          echo "MAC_USER=${ADMIN_USER}"
-          echo "MAC_PASSWORD is generated and masked; retrieve it from the credentials artifact."
+          echo "macOS user created. Password is masked."
 
-      - name: 📊 System Information
+      - name: System Information
         run: |
           chmod +x scripts/system-info.sh
           ./scripts/system-info.sh
 
-      - name: 🎮 Install Parsec (for optional manual use)
+      - name: Install Parsec
         run: |
           chmod +x scripts/install-parsec.sh
           ./scripts/install-parsec.sh
 
-      - name: 🦀 Setup RustDesk
+      - name: Setup RustDesk
         id: rustdesk
         run: |
           set -e
           chmod +x scripts/setup-rustdesk.sh
 
           RUSTDESK_PASSWORD=$(openssl rand -hex 12)
-          echo "::add-mask::${RUSTDESK_PASSWORD}"
-          echo "RUSTDESK_PASSWORD=${RUSTDESK_PASSWORD}" >> "$GITHUB_ENV"
+          echo "::add-mask::$RUSTDESK_PASSWORD"
+          echo "RUSTDESK_PASSWORD=$RUSTDESK_PASSWORD" >> "$GITHUB_ENV"
 
           export RUSTDESK_PASSWORD
           ./scripts/setup-rustdesk.sh
           sleep 10
 
-      - name: 🔑 Get RustDesk ID
+      - name: Get RustDesk ID
         id: get_id
         run: |
           sleep 5
-
           RUSTDESK_CLI="/Applications/RustDesk.app/Contents/MacOS/rustdesk"
           RUSTDESK_ID=""
 
@@ -234,17 +214,16 @@ jobs:
           fi
 
           if [ -n "$RUSTDESK_ID" ]; then
-            echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_ENV"
-            echo "RUSTDESK_ID=${RUSTDESK_ID}" >> "$GITHUB_OUTPUT"
+            echo "RUSTDESK_ID=$RUSTDESK_ID" >> "$GITHUB_ENV"
+            echo "RUSTDESK_ID=$RUSTDESK_ID" >> "$GITHUB_OUTPUT"
             echo "RustDesk ID retrieved."
           else
             echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_ENV"
             echo "RUSTDESK_ID=Check_Logs" >> "$GITHUB_OUTPUT"
-            echo "::warning::Could not retrieve RustDesk ID automatically."
+            echo "::warning::Could not retrieve RustDesk ID."
           fi
 
-      # Authentication launch must not prevent credentials from being saved.
-      - name: 🔐 Start Hermes Portal Authentication
+      - name: Start Hermes Portal Authentication
         continue-on-error: true
         run: |
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
@@ -258,17 +237,7 @@ jobs:
           mkdir -p "$DESKTOP"
 
           if ! command -v hermes >/dev/null 2>&1; then
-            echo "::warning::Hermes CLI not found; skipping interactive authentication."
-            exit 0
-          fi
-
-          if [ ! -d "/Applications/Google Chrome.app" ]; then
-            echo "::warning::Google Chrome not found; skipping interactive authentication."
-            exit 0
-          fi
-
-          if [ ! -d "/Applications/RustDesk.app" ]; then
-            echo "::warning::RustDesk.app not found; skipping interactive authentication."
+            echo "::warning::Hermes CLI not found; skipping authentication."
             exit 0
           fi
 
@@ -276,10 +245,10 @@ jobs:
           HERMES PORTAL AUTHENTICATION
 
           1. Connect to this Mac using RustDesk.
-          2. Look for the Terminal window for Hermes Portal authentication.
+          2. Find the Terminal window for Hermes authentication.
           3. Complete the Nous Portal login in Google Chrome.
-          4. Return to Terminal and finish any setup/model-selection prompts.
-          5. Check Hermes-Auth.log on the Desktop if setup fails.
+          4. Return to Terminal and finish setup.
+          5. Check Hermes-Auth.log if setup fails.
 
           Keep authentication tokens private.
           EOF
@@ -287,13 +256,11 @@ jobs:
           cat > "$AUTH_SCRIPT" <<'AUTH_EOF'
           #!/bin/bash
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          export BROWSER='open -a "Google Chrome" %s'
 
           LOG="$HOME/Desktop/Hermes-Auth.log"
           echo "Hermes Portal setup started: $(date)" >> "$LOG"
 
           open -a "Google Chrome" >> "$LOG" 2>&1 || true
-
           hermes setup --portal 2>&1 | tee -a "$LOG"
           RESULT=${PIPESTATUS[0]}
 
@@ -309,8 +276,6 @@ jobs:
 
           chmod +x "$AUTH_SCRIPT"
 
-          # Ask Terminal to launch the script asynchronously.
-          # If the GUI session is unavailable, the workflow continues.
           cat > "$RUNNER_TEMP/launch-hermes-terminal.applescript" <<'APPLESCRIPT'
           tell application "Terminal"
             activate
@@ -321,12 +286,155 @@ jobs:
           nohup /usr/bin/osascript "$RUNNER_TEMP/launch-hermes-terminal.applescript" \
             > "$LAUNCH_LOG" 2>&1 < /dev/null &
 
-          echo "Terminal launch request submitted in background."
-          echo "Authentication instructions: $INSTRUCTIONS"
+          echo "Authentication launch requested."
+          echo "Instructions: $INSTRUCTIONS"
           echo "Authentication log: $AUTH_LOG"
-          echo "AppleScript launch log: $LAUNCH_LOG"
 
-      - name: 💾 Save Credentials (Private File)
+      - name: Configure Hermes Dashboard HTTPS
+        id: hermes_https
+        continue-on-error: true
+        env:
+          HERMES_DASHBOARD_USERNAME: mobile
+        run: |
+          set -e
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+          command -v hermes >/dev/null 2>&1 || {
+            echo "::error::Hermes CLI is missing."
+            exit 1
+          }
+
+          command -v tailscale >/dev/null 2>&1 || {
+            echo "::error::Tailscale CLI is missing."
+            exit 1
+          }
+
+          DNS_NAME=$(tailscale status --json | python3 -c \
+            'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))')
+
+          if [ -z "$DNS_NAME" ]; then
+            echo "::error::Could not determine Tailscale DNS name."
+            exit 1
+          fi
+
+          HERMES_URL="https://${DNS_NAME}/"
+          HERMES_PASSWORD=$(openssl rand -hex 20)
+          HERMES_AUTH_SECRET=$(openssl rand -base64 32)
+
+          echo "::add-mask::$HERMES_PASSWORD"
+          echo "::add-mask::$HERMES_AUTH_SECRET"
+
+          echo "HERMES_URL=$HERMES_URL" >> "$GITHUB_ENV"
+          echo "HERMES_DASHBOARD_USERNAME=$HERMES_DASHBOARD_USERNAME" >> "$GITHUB_ENV"
+          echo "HERMES_DASHBOARD_PASSWORD=$HERMES_PASSWORD" >> "$GITHUB_ENV"
+
+          # Keep dashboard credentials in Hermes' private environment file.
+          HERMES_DIR="$HOME/.hermes"
+          ENV_FILE="$HERMES_DIR/.env"
+          mkdir -p "$HERMES_DIR"
+          touch "$ENV_FILE"
+          chmod 600 "$ENV_FILE"
+
+          TMP_ENV=$(mktemp)
+          grep -v -E '^(HERMES_DASHBOARD_BASIC_AUTH_USERNAME|HERMES_DASHBOARD_BASIC_AUTH_PASSWORD|HERMES_DASHBOARD_BASIC_AUTH_SECRET|HERMES_DASHBOARD_PUBLIC_URL)=' \
+            "$ENV_FILE" > "$TMP_ENV" || true
+
+          cat >> "$TMP_ENV" <<EOF
+          HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_USERNAME}
+          HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_PASSWORD}
+          HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_AUTH_SECRET}
+          HERMES_DASHBOARD_PUBLIC_URL=${HERMES_URL%/}
+          EOF
+
+          install -m 600 "$TMP_ENV" "$ENV_FILE"
+          rm -f "$TMP_ENV"
+
+          # The backend remains loopback-only. Tailscale Serve is the HTTPS entry point.
+          nohup env \
+            HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$HERMES_DASHBOARD_USERNAME" \
+            HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$HERMES_PASSWORD" \
+            HERMES_DASHBOARD_BASIC_AUTH_SECRET="$HERMES_AUTH_SECRET" \
+            HERMES_DASHBOARD_PUBLIC_URL="${HERMES_URL%/}" \
+            hermes dashboard --host 127.0.0.1 --port 9119 --no-open \
+            > "$RUNNER_TEMP/hermes-dashboard.log" 2>&1 < /dev/null &
+
+          echo $! > "$RUNNER_TEMP/hermes-dashboard.pid"
+
+          READY=0
+          for i in $(seq 1 45); do
+            if curl --silent --fail http://127.0.0.1:9119/api/status \
+                -o "$RUNNER_TEMP/hermes-dashboard-status.json"; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            cat "$RUNNER_TEMP/hermes-dashboard.log" || true
+            echo "::error::Hermes dashboard did not start."
+            exit 1
+          fi
+
+          python3 - "$RUNNER_TEMP/hermes-dashboard-status.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          if data.get("auth_required") is not True:
+              raise SystemExit("Dashboard auth gate is not enabled.")
+          if "basic" not in data.get("auth_providers", []):
+              raise SystemExit("Dashboard basic auth provider is not active.")
+          print("Hermes dashboard authentication is enabled.")
+          PY
+
+          sudo tailscale serve --bg --https=443 http://127.0.0.1:9119
+
+          VERIFIED=0
+          for i in $(seq 1 30); do
+            if curl --silent --show-error --fail \
+                --connect-timeout 5 --max-time 10 \
+                "$HERMES_URL/api/status" \
+                -o "$RUNNER_TEMP/hermes-https-status.json"; then
+              VERIFIED=1
+              break
+            fi
+            sleep 4
+          done
+
+          if [ "$VERIFIED" -ne 1 ]; then
+            sudo tailscale serve status || true
+            echo "::error::HTTPS endpoint verification failed."
+            exit 1
+          fi
+
+          # Verify the remote dashboard is still gated behind authentication.
+          python3 - "$RUNNER_TEMP/hermes-https-status.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          if data.get("auth_required") is not True:
+              raise SystemExit("HTTPS endpoint does not report authentication required.")
+          if "basic" not in data.get("auth_providers", []):
+              raise SystemExit("HTTPS endpoint does not report the basic auth provider.")
+          print("HTTPS endpoint and authentication gate verified.")
+          PY
+
+          {
+            echo "## Hermes Dashboard HTTPS"
+            echo ""
+            echo "Verified URL: ${HERMES_URL}"
+            echo ""
+            echo "Username: ${HERMES_DASHBOARD_USERNAME}"
+            echo ""
+            echo "Password is available only in the credentials artifact."
+            echo ""
+            echo "Keep this workflow running while using the dashboard."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Hermes dashboard is available over Tailscale HTTPS."
+          echo "URL: $HERMES_URL"
+          echo "Username: $HERMES_DASHBOARD_USERNAME"
+          echo "Password is hidden; retrieve it from the credentials artifact."
+
+      - name: Save Credentials (Private File)
         if: always()
         env:
           MAC_USER: ${{ env.MAC_USER }}
@@ -340,6 +448,8 @@ jobs:
           WARP_ENABLED: ${{ env.WARP_ENABLED }}
           HERMES_URL: ${{ env.HERMES_URL }}
           TAILSCALE_IP: ${{ env.TAILSCALE_IP }}
+          HERMES_DASHBOARD_USERNAME: ${{ env.HERMES_DASHBOARD_USERNAME }}
+          HERMES_DASHBOARD_PASSWORD: ${{ env.HERMES_DASHBOARD_PASSWORD }}
         run: |
           mkdir -p credentials
 
@@ -366,14 +476,17 @@ jobs:
           User: ${MAC_USER:-Unavailable}
           Password: ${MAC_PASSWORD:-Unavailable}
 
-          HERMES
-          URL: ${HERMES_URL:-Not started by this workflow}
-          Tailnet IP: ${TAILSCALE_IP:-Unavailable}
+          HERMES DASHBOARD HTTPS
+          URL: ${HERMES_URL:-Not available}
+          Username: ${HERMES_DASHBOARD_USERNAME:-Unavailable}
+          Password: ${HERMES_DASHBOARD_PASSWORD:-Unavailable}
+          Tailscale IP: ${TAILSCALE_IP:-Unavailable}
 
           HOW TO CONNECT
-          1. Open RustDesk on your device.
-          2. Enter the RustDesk ID above.
-          3. Enter the RustDesk password above.
+          1. Connect to Tailscale on your iPhone.
+          2. Open the HTTPS URL above in Safari.
+          3. Sign in with the Hermes dashboard credentials.
+          4. For remote desktop, use the RustDesk ID and password.
 
           WARNING: This file contains sensitive credentials.
           Do not share it publicly.
@@ -381,14 +494,9 @@ jobs:
           EOF
 
           chmod 600 credentials/connection-info.txt
+          echo "Credentials file created; secrets are not printed to logs."
 
-          # Display only non-secret connection identifiers in the log.
-          echo "Credentials file created."
-          echo "MAC_USER=${MAC_USER:-Unavailable}"
-          echo "RUSTDESK_ID=${RUSTDESK_ID:-Unavailable}"
-          echo "Passwords are hidden from logs and stored in the artifact."
-
-      - name: 📦 Upload Credentials Artifact
+      - name: Upload Credentials Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -397,35 +505,44 @@ jobs:
           if-no-files-found: warn
           retention-days: 1
 
-      - name: 📋 Connection Instructions
+      - name: Connection Instructions
         if: always()
         run: |
           echo ""
           echo "============================================================"
           echo "             GITHUB MAC REMOTE - CONNECTION"
           echo "============================================================"
-          echo "Session started by: ${{ github.actor }}"
-          echo "macOS User: ${{ env.MAC_USER || 'Unavailable' }}"
-          echo "RustDesk ID: ${{ env.RUSTDESK_ID || 'Unavailable' }}"
-          echo "Hermes URL: ${HERMES_URL:-Not started}"
-          echo "Hermex directory: $HOME/Desktop/hermex"
+          echo "macOS User: ${MAC_USER:-Unavailable}"
+          echo "RustDesk ID: ${RUSTDESK_ID:-Unavailable}"
+          echo "Hermes HTTPS URL: ${HERMES_URL:-Not available}"
+          echo "Hermes dashboard username: ${HERMES_DASHBOARD_USERNAME:-mobile}"
           echo ""
           echo "Download the credentials artifact:"
           echo "credentials-${{ github.actor }}-${{ github.run_id }}"
           echo ""
-          echo "The artifact contains the RustDesk and macOS passwords."
-          echo "Passwords are not printed in the workflow log."
-          echo "Session duration requested: ${{ env.SESSION_DURATION }} hour(s)."
+          echo "Passwords are not printed in workflow logs."
+          echo "Requested session duration: $SESSION_DURATION hour(s)."
 
-      - name: ⏱️ Keep Session Alive
+      - name: Keep Session Alive
         run: |
           chmod +x scripts/keep-alive.sh
           export DURATION_HOURS="${{ env.SESSION_DURATION }}"
           ./scripts/keep-alive.sh
 
-      - name: 💾 Save IP History Cache
+      - name: Save IP History Cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .ip-history.json
           key: ip-history-${{ github.repository_owner }}-${{ github.run_id }}
+
+      - name: Cleanup HTTPS and Dashboard
+        if: always()
+        run: |
+          sudo tailscale serve reset || true
+
+          if [ -f "$RUNNER_TEMP/hermes-dashboard.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/hermes-dashboard.pid")" 2>/dev/null || true
+          fi
+
+          echo "Temporary HTTPS and dashboard services cleaned up."
