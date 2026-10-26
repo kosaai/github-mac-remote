@@ -10,102 +10,163 @@ permissions:
 jobs:
   https-test:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 75
 
     steps:
       - name: Install Tailscale
         run: |
-          brew install --quiet tailscale
+          brew install tailscale
           sudo brew services start tailscale
 
       - name: Connect to Tailscale
         env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          if [ -z "$TS_AUTHKEY" ]; then
-            echo "Missing TS_AUTHKEY repository secret."
+          if [ -z "$TAILSCALE_AUTHKEY" ]; then
+            echo "::error::Missing TAILSCALE_AUTHKEY repository secret."
             exit 1
           fi
 
           sudo tailscale up \
-            --authkey="$TS_AUTHKEY" \
-            --hostname="https-image-test-${{ github.run_id }}"
+            --authkey="$TAILSCALE_AUTHKEY" \
+            --hostname="https-image-test-${GITHUB_RUN_ID}"
+
+          for i in $(seq 1 30); do
+            if tailscale status >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
 
           tailscale status
-          tailscale ip -4
 
-      - name: Create test image and web server
+      - name: Create test page and image
         run: |
           mkdir -p "$RUNNER_TEMP/https-test"
+
           cat > "$RUNNER_TEMP/https-test/index.html" <<'HTML'
           <!doctype html>
           <html>
-          <head><meta name="viewport" content="width=device-width">
-          <title>Tailscale HTTPS Test</title></head>
+          <head>
+            <meta name="viewport" content="width=device-width">
+            <title>Tailscale HTTPS Test</title>
+          </head>
           <body style="font-family:sans-serif;text-align:center">
-          <h1>HTTPS works!</h1>
-          <p>This test page is served from a temporary Mac.</p>
-          <img src="/test.svg" alt="Test image" width="240">
-          </body></html>
+            <h1>HTTPS works!</h1>
+            <p>This test page is served from a temporary Mac.</p>
+            <img src="/test.svg" alt="Test image" width="240">
+          </body>
+          </html>
           HTML
 
           cat > "$RUNNER_TEMP/https-test/test.svg" <<'SVG'
-          <svg xmlns="http://www.w3.org/2000/svg" width="240" height="140">
-            <rect width="100%" height="100%" rx="16" fill="#dbeafe"/>
+          <svg xmlns="http://www.w3.org/2000/svg"
+               width="240" height="140">
+            <rect width="100%" height="100%" rx="16"
+                  fill="#dbeafe"/>
             <text x="120" y="78" text-anchor="middle"
-              font-size="22" fill="#1e40af">Mac image test</text>
+                  font-size="22" fill="#1e40af">
+              Mac image test
+            </text>
           </svg>
           SVG
 
-          cd "$RUNNER_TEMP/https-test"
           nohup python3 -m http.server 8765 \
             --bind 127.0.0.1 \
+            --directory "$RUNNER_TEMP/https-test" \
             > "$RUNNER_TEMP/http.log" 2>&1 &
+
           echo $! > "$RUNNER_TEMP/http.pid"
 
-          for i in $(seq 1 15); do
+          for i in $(seq 1 20); do
             if curl -fsS http://127.0.0.1:8765/ >/dev/null; then
-              break
+              exit 0
             fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8765/ >/dev/null
 
-      - name: Enable HTTPS with Tailscale Serve
+          cat "$RUNNER_TEMP/http.log"
+          echo "::error::Test web server did not start."
+          exit 1
+
+      - name: Configure HTTPS
+        id: https
         run: |
-          sudo tailscale serve --bg \
+          set -e
+
+          sudo tailscale serve \
+            --bg \
             --https=443 \
             http://127.0.0.1:8765
 
-          tailscale serve status
-          tailscale status --json > "$RUNNER_TEMP/ts-status.json"
+          DNS=""
+          for i in $(seq 1 20); do
+            DNS=$(tailscale status --json | python3 -c \
+              'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))') || true
 
-          python3 - "$RUNNER_TEMP/ts-status.json" <<'PY'
-          import json, sys
-          d = json.load(open(sys.argv[1]))
-          self_info = d.get("Self", {})
-          dns = self_info.get("DNSName", "").rstrip(".")
-          if not dns:
-              raise SystemExit("Could not determine the Tailscale DNS name.")
-          print("TEST_URL=https://" + dns + "/")
-          PY
+            if [ -n "$DNS" ]; then
+              break
+            fi
+            sleep 2
+          done
 
-      - name: Verify HTTPS
+          if [ -z "$DNS" ]; then
+            echo "::error::Could not determine Tailscale DNS name."
+            exit 1
+          fi
+
+          URL="https://${DNS}/"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+          echo "Waiting for HTTPS certificate and endpoint..."
+          OK=0
+          for i in $(seq 1 30); do
+            if curl --silent --show-error --fail \
+                --connect-timeout 5 --max-time 10 \
+                "$URL" -o "$RUNNER_TEMP/https-response.html"; then
+              if grep -q "HTTPS works!" "$RUNNER_TEMP/https-response.html"; then
+                OK=1
+                break
+              fi
+            fi
+            sleep 4
+          done
+
+          if [ "$OK" -ne 1 ]; then
+            sudo tailscale serve status || true
+            echo "::error::HTTPS verification failed; no working link is being reported."
+            exit 1
+          fi
+
+          echo "HTTPS verified successfully."
+
+          {
+            echo "## Tailscale HTTPS test"
+            echo ""
+            echo "Open this link on your iPhone while Tailscale is connected:"
+            echo ""
+            echo "[${URL}](${URL})"
+            echo ""
+            echo "The test session remains active for one hour after verification."
+            echo "Cancel this workflow manually to stop it sooner."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::notice title=HTTPS test link::$URL"
+          echo "TEST URL: $URL"
+
+      - name: Keep session alive for one hour
         run: |
-          DNS=$(tailscale status --json | python3 -c \
-            'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+          echo "HTTPS test passed."
+          echo "The link remains available for 60 minutes."
+          echo "To stop early, cancel this workflow from GitHub Actions."
 
-          echo "Open on your iPhone: https://${DNS}/"
-          echo "Keep this workflow running while testing."
-          echo "The runner is temporary; the link will stop working when the job ends."
-
-          sleep 1200
+          sleep 3600
 
       - name: Cleanup
         if: always()
         run: |
           sudo tailscale serve reset || true
-          sudo tailscale logout || true
           if [ -f "$RUNNER_TEMP/http.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/http.pid")" 2>/dev/null || true
           fi
+          sudo tailscale logout || true
