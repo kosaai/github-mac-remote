@@ -1,0 +1,111 @@
+
+name: Tailscale HTTPS Image Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  https-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Install Tailscale
+        run: |
+          brew install --quiet tailscale
+          sudo brew services start tailscale
+
+      - name: Connect to Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "Missing TS_AUTHKEY repository secret."
+            exit 1
+          fi
+
+          sudo tailscale up \
+            --authkey="$TS_AUTHKEY" \
+            --hostname="https-image-test-${{ github.run_id }}"
+
+          tailscale status
+          tailscale ip -4
+
+      - name: Create test image and web server
+        run: |
+          mkdir -p "$RUNNER_TEMP/https-test"
+          cat > "$RUNNER_TEMP/https-test/index.html" <<'HTML'
+          <!doctype html>
+          <html>
+          <head><meta name="viewport" content="width=device-width">
+          <title>Tailscale HTTPS Test</title></head>
+          <body style="font-family:sans-serif;text-align:center">
+          <h1>HTTPS works!</h1>
+          <p>This test page is served from a temporary Mac.</p>
+          <img src="/test.svg" alt="Test image" width="240">
+          </body></html>
+          HTML
+
+          cat > "$RUNNER_TEMP/https-test/test.svg" <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="240" height="140">
+            <rect width="100%" height="100%" rx="16" fill="#dbeafe"/>
+            <text x="120" y="78" text-anchor="middle"
+              font-size="22" fill="#1e40af">Mac image test</text>
+          </svg>
+          SVG
+
+          cd "$RUNNER_TEMP/https-test"
+          nohup python3 -m http.server 8765 \
+            --bind 127.0.0.1 \
+            > "$RUNNER_TEMP/http.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/http.pid"
+
+          for i in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:8765/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8765/ >/dev/null
+
+      - name: Enable HTTPS with Tailscale Serve
+        run: |
+          sudo tailscale serve --bg \
+            --https=443 \
+            http://127.0.0.1:8765
+
+          tailscale serve status
+          tailscale status --json > "$RUNNER_TEMP/ts-status.json"
+
+          python3 - "$RUNNER_TEMP/ts-status.json" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          self_info = d.get("Self", {})
+          dns = self_info.get("DNSName", "").rstrip(".")
+          if not dns:
+              raise SystemExit("Could not determine the Tailscale DNS name.")
+          print("TEST_URL=https://" + dns + "/")
+          PY
+
+      - name: Verify HTTPS
+        run: |
+          DNS=$(tailscale status --json | python3 -c \
+            'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+
+          echo "Open on your iPhone: https://${DNS}/"
+          echo "Keep this workflow running while testing."
+          echo "The runner is temporary; the link will stop working when the job ends."
+
+          sleep 1200
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo tailscale serve reset || true
+          sudo tailscale logout || true
+          if [ -f "$RUNNER_TEMP/http.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/http.pid")" 2>/dev/null || true
+          fi
